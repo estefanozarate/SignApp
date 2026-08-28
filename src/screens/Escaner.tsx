@@ -1,9 +1,8 @@
-import React, { useCallback, useRef, useState } from 'react';
-import { Linking, Pressable, StyleSheet, Text, View } from 'react-native';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
-  Camera, isScannedCode, useCameraDevice, useCameraPermission, useObjectOutput,
-} from 'react-native-vision-camera';
-import type { ScannedObject, ScannedObjectType } from 'react-native-vision-camera';
+  Linking, PermissionsAndroid, Pressable, StyleSheet, Text, View,
+} from 'react-native';
+import { Camera, CameraType } from 'react-native-camera-kit';
 import { NativeStackScreenProps } from '@react-navigation/native-stack';
 import { useIsFocused } from '@react-navigation/native';
 import Pantalla from '../components/Pantalla';
@@ -17,16 +16,17 @@ import { emisores } from '../services/trustlist';
 import { Rutas } from '../navigation/tipos';
 
 type Props = NativeStackScreenProps<Rutas, 'Escaner'>;
+
+/** Forma del evento de camera-kit; declarada aquí para no arrastrar sus fuentes. */
+type LecturaCodigo = { nativeEvent: { codeStringValue: string; codeFormat: string } };
 type Paso = 'firma' | 'vigencia' | 'sesion';
+type Permiso = 'pidiendo' | 'concedido' | 'denegado' | 'bloqueado';
 
 const PASOS: { id: Paso; texto: string }[] = [
   { id: 'firma', texto: 'Firma del emisor' },
   { id: 'vigencia', texto: 'Vigencia del código' },
   { id: 'sesion', texto: 'Sesión abierta en el sitio' },
 ];
-
-/** Referencia estable: useObjectOutput reconstruye la salida si el array cambia. */
-const TIPOS: ScannedObjectType[] = ['qr'];
 
 const DONDE_FALLA: Record<string, Paso> = {
   E_FORMATO: 'firma',
@@ -38,17 +38,33 @@ const DONDE_FALLA: Record<string, Paso> = {
 /**
  * La verificación es lo que distingue esta app de un lector de QR cualquiera,
  * así que se muestra paso a paso en vez de esconderla tras un spinner.
+ *
+ * El permiso se pide ANTES de montar la cámara: montarla sin permiso hacía
+ * que la capa nativa reventara sin aviso.
  */
 export default function Escaner({ navigation }: Props) {
-  const dispositivo = useCameraDevice('back');
-  const { hasPermission, canRequestPermission, requestPermission } = useCameraPermission();
   const enfocada = useIsFocused();
-
+  const [permiso, setPermiso] = useState<Permiso>('pidiendo');
   const [detectado, setDetectado] = useState(false);
   const [hechos, setHechos] = useState<Paso[]>([]);
   const [fallo, setFallo] = useState<Paso | null>(null);
   const [pie, setPie] = useState('Apunta al código que aparece en la pantalla del sitio.');
   const procesando = useRef(false);
+
+  const pedirCamara = useCallback(async () => {
+    setPermiso('pidiendo');
+    const r = await PermissionsAndroid.request(PermissionsAndroid.PERMISSIONS.CAMERA, {
+      title: 'Sello necesita la cámara',
+      message: 'Solo para leer el código que muestra el sitio. No se guarda ni se envía ninguna imagen.',
+      buttonPositive: 'Permitir',
+      buttonNegative: 'Ahora no',
+    });
+    if (r === PermissionsAndroid.RESULTS.GRANTED) setPermiso('concedido');
+    else if (r === PermissionsAndroid.RESULTS.NEVER_ASK_AGAIN) setPermiso('bloqueado');
+    else setPermiso('denegado');
+  }, []);
+
+  useEffect(() => { pedirCamara(); }, [pedirCamara]);
 
   const procesar = useCallback(async (payload: string) => {
     if (procesando.current) return;
@@ -76,30 +92,24 @@ export default function Escaner({ navigation }: Props) {
     }
   }, [navigation]);
 
-  const alEscanear = useCallback((objetos: ScannedObject[]) => {
-    for (const o of objetos) {
-      if (isScannedCode(o) && o.value) { procesar(o.value); return; }
-    }
+  const alLeer = useCallback((evento: LecturaCodigo) => {
+    const valor = evento?.nativeEvent?.codeStringValue;
+    if (valor) procesar(valor);
   }, [procesar]);
 
-  const salidaCodigos = useObjectOutput({ types: TIPOS, onObjectsScanned: alEscanear });
-
-  const pedirCamara = useCallback(async () => {
-    const concedido = await requestPermission();
-    if (!concedido && !canRequestPermission) Linking.openSettings();
-  }, [requestPermission, canRequestPermission]);
-
-  if (!hasPermission || !dispositivo) {
+  if (permiso !== 'concedido') {
     return (
       <Pantalla oscura style={s.permiso}>
         <Cuerpo style={{ color: color.huesoTenue, marginBottom: 20, textAlign: 'center' }}>
-          {dispositivo
-            ? 'Sello necesita la cámara para leer el código del sitio. No se guarda ni se envía ninguna imagen.'
-            : 'No se encontró la cámara trasera de este teléfono.'}
+          {permiso === 'pidiendo'
+            ? 'Pidiendo acceso a la cámara…'
+            : 'Sello necesita la cámara para leer el código del sitio. No se guarda ni se envía ninguna imagen.'}
         </Cuerpo>
-        {dispositivo ? (
-          <Boton variante="claro" onPress={pedirCamara}>
-            {canRequestPermission ? 'Permitir la cámara' : 'Abrir los ajustes'}
+        {permiso !== 'pidiendo' ? (
+          <Boton
+            variante="claro"
+            onPress={permiso === 'bloqueado' ? () => Linking.openSettings() : pedirCamara}>
+            {permiso === 'bloqueado' ? 'Abrir los ajustes' : 'Permitir la cámara'}
           </Boton>
         ) : null}
         <Boton
@@ -114,12 +124,20 @@ export default function Escaner({ navigation }: Props) {
 
   return (
     <Pantalla oscura sinBorde>
-      <Camera
-        style={StyleSheet.absoluteFill}
-        device={dispositivo}
-        isActive={enfocada && !detectado}
-        outputs={[salidaCodigos]}
-      />
+      {enfocada && !detectado ? (
+        <Camera
+          style={StyleSheet.absoluteFill}
+          cameraType={CameraType.Back}
+          scanBarcode
+          allowedBarcodeTypes={['qr']}
+          scanThrottleDelay={500}
+          onReadCode={alLeer}
+          // El marco lo dibuja el guilloché, no la librería.
+          showFrame={false}
+        />
+      ) : (
+        <View style={[StyleSheet.absoluteFill, { backgroundColor: color.tinta }]} />
+      )}
 
       {/* La retícula se contrae al detectar: el mismo guilloché del emblema. */}
       <View style={s.reticula} pointerEvents="none">

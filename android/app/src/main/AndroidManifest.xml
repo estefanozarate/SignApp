@@ -5,10 +5,11 @@
     <uses-permission android:name="android.permission.USE_BIOMETRIC" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
 
-    <uses-feature android:name="android.hardware.camera" android:required="true" />
-    <!-- El chip seguro es un requisito real de la app, no un extra. -->
+    <!-- Nada de esto es requisito duro: con PIN del dispositivo la app funciona,
+         y exigirlo impedía instalar en equipos sin sensor biométrico. -->
+    <uses-feature android:name="android.hardware.camera" android:required="false" />
     <uses-feature android:name="android.hardware.strongbox_keystore" android:required="false" />
-    <uses-feature android:name="android.hardware.biometrics" android:required="true" />
+    <uses-feature android:name="android.hardware.biometrics" android:required="false" />
 
     <application
       android:name=".MainApplication"
