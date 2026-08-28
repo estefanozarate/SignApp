@@ -1,8 +1,8 @@
 [
   {
-    "kid": "ab25142656e29eb4",
+    "kid": "caf29392576d3bd5",
     "alg": "ES256",
-    "spkiB64": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAElBYlsnIzuxYIRIWJaM1pTJ1uInTiJasT/s7Zvm9Kn8iiYFlPUYcdYSdP5jOkiVXAZihLePHDMaDfDu5tE+gyuQ==",
-    "nombre": "EJEMPLO \u2014 reemplazar antes de publicar"
+    "spkiB64": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEQ8S9jcHAH2lbrT6UXZL8sZXvU85LWwbKA1EVY/kvYOsILtjD9TBmaZcEr44fdeV2xN7sFyAmoa1RodOjo6NgUg==",
+    "nombre": "xami.run"
   }
 ]
