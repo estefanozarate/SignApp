@@ -1,0 +1,24 @@
+node_modules/
+android/app/build/
+android/build/
+android/.gradle/
+android/local.properties
+android/app/release/
+
+# Firmas — nunca subir un keystore de release
+*.keystore
+*.jks
+!debug.keystore
+
+# macOS
+.DS_Store
+
+# Entorno
+.env
+.env.local
+
+# Metro / logs
+.metro-health-check*
+*.log
+npm-debug.log*
+yarn-error.log*
