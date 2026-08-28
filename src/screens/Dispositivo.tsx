@@ -1,50 +1,33 @@
-import React, { useCallback, useState } from 'react';
+import React, { useState } from 'react';
 import { Alert, Modal, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { NativeStackScreenProps } from '@react-navigation/native-stack';
-import { useFocusEffect } from '@react-navigation/native';
 import Pantalla from '../components/Pantalla';
-import { Boton, Ceja, Cuerpo, Fila, H2, Minima, Mono, Regla, Tarjeta } from '../components/ui';
+import { Boton, Ceja, Cuerpo, Fila, H2, Minima, Mono, Tarjeta } from '../components/ui';
 import { Atras } from '../components/Iconos';
 import { color, espacio, radio, tipo } from '../theme';
 import { useSesion } from '../state/sesion';
-import { cerrarSesion, eliminarDispositivo } from '../services/auth';
-import { actualizadaHace, emisores, olvidarLista } from '../services/trustlist';
+import { eliminarIdentidad } from '../services/identidad';
+import { olvidarActividad } from '../services/actividad';
+import { olvidarEmisores } from '../services/trustlist';
 import { Rutas } from '../navigation/tipos';
 
 type Props = NativeStackScreenProps<Rutas, 'Dispositivo'>;
 
 export default function Dispositivo({ navigation }: Props) {
   const { identidad, refrescar } = useSesion();
-  const [listaHace, setListaHace] = useState<number | null>(null);
   const [confirmando, setConfirmando] = useState(false);
   const [borrando, setBorrando] = useState(false);
 
-  useFocusEffect(useCallback(() => { actualizadaHace().then(setListaHace); }, []));
-
-  const refrescarLista = async () => {
-    try {
-      await emisores(true);
-      setListaHace(await actualizadaHace());
-    } catch {
-      Alert.alert('Sin conexión', 'Seguirás usando la lista guardada hasta que vuelva la red.');
-    }
-  };
-
-  const salir = async () => {
-    await cerrarSesion();
-    await refrescar();
-  };
-
   const eliminar = async () => {
-    if (!identidad) return;
     setBorrando(true);
     try {
-      await eliminarDispositivo(identidad.keyId);
-      await olvidarLista();
+      await eliminarIdentidad();
+      await olvidarActividad();
+      await olvidarEmisores();
       setConfirmando(false);
       await refrescar();
-    } catch (e) {
-      Alert.alert('No se pudo eliminar', (e as Error).message);
+    } catch (e: any) {
+      Alert.alert('No se pudo eliminar', e?.message ?? 'Error desconocido.');
     } finally {
       setBorrando(false);
     }
@@ -60,43 +43,35 @@ export default function Dispositivo({ navigation }: Props) {
       </View>
 
       <ScrollView contentContainerStyle={s.cuerpo} showsVerticalScrollIndicator={false}>
-        <Tarjeta style={{ marginBottom: 22 }}>
+        <Tarjeta style={{ marginBottom: 14 }}>
           <Fila etiqueta="Clave de firma" primera>
             <Mono>{identidad ? `${identidad.keyId.slice(0, 8)}··${identidad.keyId.slice(-4)}` : '—'}</Mono>
           </Fila>
           <Fila etiqueta="Creada">
-            {identidad ? new Date(identidad.creadaEn).toLocaleDateString('es-PE', {
-              day: 'numeric', month: 'short', year: 'numeric',
-            }) : '—'}
+            {identidad
+              ? new Date(identidad.creadaEn).toLocaleDateString('es-PE', {
+                  day: 'numeric', month: 'short', year: 'numeric',
+                })
+              : '—'}
           </Fila>
           <Fila etiqueta="Protección">
-            {identidad?.strongBox ? 'StrongBox + rostro' : 'Hardware + rostro'}
+            {identidad?.strongBox ? 'StrongBox + biometría' : 'Hardware + biometría'}
           </Fila>
-          <Fila etiqueta="Emisores de confianza">
-            {listaHace === null ? 'Sin descargar' : `Al día · hace ${Math.round(listaHace / 60000)} min`}
-          </Fila>
+          <Fila etiqueta="Algoritmo">{identidad?.algoritmo ?? '—'}</Fila>
         </Tarjeta>
-        <Pressable onPress={refrescarLista} style={{ marginTop: -12, marginBottom: 22 }}>
-          <Minima style={{ color: color.intaglio, textDecorationLine: 'underline' }}>
-            Actualizar la lista de emisores
-          </Minima>
-        </Pressable>
 
-        <Ceja style={{ marginBottom: 10 }}>Sesión</Ceja>
-        <Boton variante="fantasma" onPress={salir}>Cerrar sesión</Boton>
-        <Minima style={{ marginTop: 10 }}>
-          Sales de la app. Tu clave de firma se queda en el teléfono, así que la próxima vez solo necesitas tu rostro.
+        <Minima style={{ marginBottom: 30 }}>
+          La clave se generó en este teléfono y nunca sale de él. No hay servidor donde esté
+          registrada, ni copia que se pueda restaurar.
         </Minima>
-
-        <Regla />
 
         <Ceja style={{ marginBottom: 10 }}>Retirar el dispositivo</Ceja>
         <Boton variante="peligro" deshabilitado={!identidad} onPress={() => setConfirmando(true)}>
           Eliminar esta identidad
         </Boton>
         <Minima style={{ marginTop: 10 }}>
-          Borra la clave del chip seguro y desvincula el teléfono. Es permanente: para volver a aprobar desde aquí,
-          tendrás que crear una identidad nueva.
+          Borra la clave del chip seguro junto con el historial de aprobaciones. Es permanente:
+          para volver a aprobar desde aquí, tendrás que crear una identidad nueva.
         </Minima>
         <View style={{ height: 30 }} />
       </ScrollView>
@@ -106,11 +81,13 @@ export default function Dispositivo({ navigation }: Props) {
         <View style={s.dialogo}>
           <H2 style={{ fontSize: 22, marginBottom: 10 }}>¿Eliminar esta identidad?</H2>
           <Cuerpo style={{ marginBottom: 20 }}>
-            La clave se borra del chip seguro y no se puede recuperar. Las sesiones que aprobaste seguirán siendo
-            válidas hasta que caduquen.
+            La clave se borra del chip seguro y no se puede recuperar. Las sesiones que aprobaste
+            seguirán siendo válidas hasta que caduquen.
           </Cuerpo>
           <Boton variante="peligro" cargando={borrando} onPress={eliminar}>Sí, eliminar</Boton>
-          <Boton variante="fantasma" style={{ marginTop: 8 }} onPress={() => setConfirmando(false)}>Cancelar</Boton>
+          <Boton variante="fantasma" style={{ marginTop: 8 }} onPress={() => setConfirmando(false)}>
+            Cancelar
+          </Boton>
         </View>
       </Modal>
     </Pantalla>

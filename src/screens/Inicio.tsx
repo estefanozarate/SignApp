@@ -1,5 +1,5 @@
-import React, { useCallback, useEffect, useState } from 'react';
-import { Pressable, ScrollView, StyleSheet, View } from 'react-native';
+import React, { useCallback, useState } from 'react';
+import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { NativeStackScreenProps } from '@react-navigation/native-stack';
 import { useFocusEffect } from '@react-navigation/native';
 import Pantalla from '../components/Pantalla';
@@ -8,27 +8,18 @@ import { Boton, Ceja, Minima, Pildora } from '../components/ui';
 import { Candado, Escanear, Telefono } from '../components/Iconos';
 import { EMBLEMA } from '../lib/guilloche';
 import { color, espacio, tipo } from '../theme';
-import { Text } from 'react-native';
 import { useSesion } from '../state/sesion';
-import { pedir } from '../services/api';
-import { emisores } from '../services/trustlist';
+import { cuandoLegible, Evento, listar } from '../services/actividad';
 import { Rutas } from '../navigation/tipos';
 
 type Props = NativeStackScreenProps<Rutas, 'Inicio'>;
-type Evento = { id: string; que: string; cuando: string; resultado: 'aprobado' | 'rechazado' };
 
 export default function Inicio({ navigation }: Props) {
   const { identidad } = useSesion();
   const [actividad, setActividad] = useState<Evento[]>([]);
 
-  useFocusEffect(useCallback(() => {
-    pedir<{ events: Evento[] }>('/actividad?limit=5')
-      .then(r => setActividad(r.events))
-      .catch(() => {}); // la actividad es secundaria: si no hay red, no molesta
-  }, []));
-
-  // Refrescamos la lista de emisores en segundo plano para poder verificar offline.
-  useEffect(() => { emisores().catch(() => {}); }, []);
+  // El historial es local: no hay servidor al que preguntarle.
+  useFocusEffect(useCallback(() => { listar().then(setActividad); }, []));
 
   const corto = identidad ? `${identidad.keyId.slice(0, 4)}··${identidad.keyId.slice(-4)}` : '····';
 
@@ -67,23 +58,25 @@ export default function Inicio({ navigation }: Props) {
         </Boton>
 
         <Ceja style={{ marginTop: 32, marginBottom: 4 }}>Últimas aprobaciones</Ceja>
-        {actividad.length === 0
-          ? <Minima style={{ paddingVertical: 14 }}>
-              Todavía no has aprobado nada. Cuando un sitio te muestre un código, escanéalo desde aquí.
-            </Minima>
-          : actividad.map((e, i) => (
-              <View key={e.id} style={[s.evento, i > 0 && s.eventoBorde]}>
-                <View style={[s.marca, {
-                  backgroundColor: e.resultado === 'aprobado' ? color.intaglio : color.carmin,
-                }]} />
-                <View style={{ flex: 1 }}>
-                  <Text style={tipo.dato}>{e.que}</Text>
-                  <Text style={[tipo.minima, { marginTop: 2 }]}>
-                    {e.cuando} · {e.resultado === 'aprobado' ? 'Aprobado' : 'Rechazado por ti'}
-                  </Text>
-                </View>
+        {actividad.length === 0 ? (
+          <Minima style={{ paddingVertical: 14 }}>
+            Todavía no has aprobado nada. Cuando un sitio te muestre un código, escánealo desde aquí.
+          </Minima>
+        ) : (
+          actividad.map((e, i) => (
+            <View key={e.id} style={[s.evento, i > 0 && s.eventoBorde]}>
+              <View style={[s.marca, {
+                backgroundColor: e.resultado === 'aprobado' ? color.intaglio : color.carmin,
+              }]} />
+              <View style={{ flex: 1 }}>
+                <Text style={tipo.dato}>{e.accion} · {e.origen}</Text>
+                <Text style={[tipo.minima, { marginTop: 2 }]}>
+                  {cuandoLegible(e.cuando)} · {e.resultado === 'aprobado' ? 'Aprobado' : 'Rechazado por ti'}
+                </Text>
               </View>
-            ))}
+            </View>
+          ))
+        )}
         <View style={{ height: 28 }} />
       </ScrollView>
     </Pantalla>

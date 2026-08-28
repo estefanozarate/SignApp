@@ -3,11 +3,11 @@ import { Alert, StyleSheet, View } from 'react-native';
 import { NativeStackScreenProps } from '@react-navigation/native-stack';
 import Pantalla from '../components/Pantalla';
 import Rosette from '../components/Rosette';
-import { Boton, Cuerpo, Display, Ceja } from '../components/ui';
+import { Boton, Ceja, Cuerpo, Display, Minima } from '../components/ui';
 import { HERO } from '../lib/guilloche';
-import { color, espacio, tipo } from '../theme';
-import { iniciarSesion, registrar } from '../services/auth';
-import { PasskeyCancelada, SinPasskeys } from '../native/Passkey';
+import { color, espacio } from '../theme';
+import { asegurarIdentidad } from '../services/identidad';
+import { BiometriaCancelada } from '../native/Signing';
 import { useSesion } from '../state/sesion';
 import { Rutas } from '../navigation/tipos';
 
@@ -15,23 +15,25 @@ type Props = NativeStackScreenProps<Rutas, 'Bienvenida'>;
 
 export default function Bienvenida(_: Props) {
   const { refrescar } = useSesion();
-  const [ocupado, setOcupado] = useState<'crear' | 'entrar' | null>(null);
+  const [ocupado, setOcupado] = useState(false);
 
-  const correr = async (cual: 'crear' | 'entrar') => {
-    setOcupado(cual);
+  const crear = async () => {
+    setOcupado(true);
     try {
-      // El nombre real vendría de un campo previo; aquí el backend lo resuelve.
-      cual === 'crear' ? await registrar('estefano') : await iniciarSesion();
+      await asegurarIdentidad();
       await refrescar();
-    } catch (e) {
-      if (e instanceof PasskeyCancelada) return;
-      if (e instanceof SinPasskeys) {
-        Alert.alert('Sin passkeys aquí', 'Este teléfono no tiene ninguna passkey de Sello. Crea una identidad nueva.');
+    } catch (e: any) {
+      if (e instanceof BiometriaCancelada) return;
+      if (e?.code === 'E_SIN_BIOMETRIA') {
+        Alert.alert(
+          'Falta configurar la biometría',
+          'Sello firma con el chip seguro del teléfono, y eso exige tener huella o rostro registrados. Actívalo en Ajustes y vuelve.',
+        );
         return;
       }
-      Alert.alert('No se pudo continuar', (e as Error).message);
+      Alert.alert('No se pudo crear la identidad', e?.message ?? 'Error desconocido.');
     } finally {
-      setOcupado(null);
+      setOcupado(false);
     }
   };
 
@@ -47,19 +49,19 @@ export default function Bienvenida(_: Props) {
           Tu firma vive{'\n'}en este teléfono.
         </Display>
         <Cuerpo style={{ color: color.huesoTenue, maxWidth: 300, marginBottom: 26 }}>
-          Se crea dentro del chip seguro y no puede salir de él. Cada vez que apruebas algo, firmas con tu rostro.
+          Se crea dentro del chip seguro y no puede salir de él. No hay cuenta ni contraseña:
+          este teléfono es la identidad.
         </Cuerpo>
 
-        <Boton variante="claro" cargando={ocupado === 'crear'} onPress={() => correr('crear')}>
+        <Boton variante="claro" cargando={ocupado} onPress={crear}>
           Crear identidad
         </Boton>
-        <Boton
-          variante="fantasma"
-          style={{ borderColor: 'rgba(231,233,227,0.22)', marginTop: 10 }}
-          cargando={ocupado === 'entrar'}
-          onPress={() => correr('entrar')}>
-          <Cuerpo style={{ ...tipo.etiqueta, color: color.hueso }}>Ya tengo una cuenta</Cuerpo>
-        </Boton>
+
+        {/* Sin copia de seguridad posible: hay que decirlo antes, no después. */}
+        <Minima style={{ color: color.huesoTenue, marginTop: 14, textAlign: 'center' }}>
+          La clave no se puede copiar ni respaldar. Si pierdes el teléfono, tendrás que crear
+          una identidad nueva.
+        </Minima>
       </View>
     </Pantalla>
   );
