@@ -3,6 +3,7 @@ import {
   Linking, PermissionsAndroid, Pressable, StyleSheet, Text, View,
 } from 'react-native';
 import { Camera, CameraType } from 'react-native-camera-kit';
+import { SafeAreaView } from 'react-native-safe-area-context';
 import { NativeStackScreenProps } from '@react-navigation/native-stack';
 import { useIsFocused } from '@react-navigation/native';
 import Pantalla from '../components/Pantalla';
@@ -144,7 +145,9 @@ export default function Escaner({ navigation }: Props) {
         <Rosette anillos={RETICULA} tamano={290} escala={detectado ? 0.74 : 1} />
       </View>
 
-      <Pantalla oscura style={s.capa}>
+      {/* Capa de UI transparente. Antes era otro <Pantalla>, cuya raíz opaca
+          tapaba la cámara y la retícula. */}
+      <SafeAreaView style={s.capa} edges={['top', 'bottom']} pointerEvents="box-none">
         <View style={s.cabecera}>
           <Pressable onPress={() => navigation.goBack()} style={s.iconbtn} accessibilityLabel="Volver">
             <Atras color={color.hueso} />
@@ -170,7 +173,7 @@ export default function Escaner({ navigation }: Props) {
           </View>
           <Cuerpo style={{ color: color.huesoTenue, fontSize: 13 }}>{pie}</Cuerpo>
         </View>
-      </Pantalla>
+      </SafeAreaView>
     </Pantalla>
   );
 }
@@ -188,7 +191,7 @@ const lleno = { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0 } as 
 
 const s = StyleSheet.create({
   permiso: { justifyContent: 'center', paddingHorizontal: espacio.l },
-  capa: { backgroundColor: 'transparent' },
+  capa: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, backgroundColor: 'transparent' },
   reticula: { ...lleno, alignItems: 'center', justifyContent: 'center', top: -60 },
   cabecera: { height: 56, flexDirection: 'row', alignItems: 'center', gap: 6, paddingLeft: 10 },
   iconbtn: { width: 40, height: 40, borderRadius: 20, alignItems: 'center', justifyContent: 'center' },
