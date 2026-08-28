@@ -1,0 +1,694 @@
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Sello — prototipo de app</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Bodoni+Moda:opsz,wght@6..96,400;6..96,500;6..96,600&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+
+<style>
+:root{
+  --tinta:#101821;
+  --hueso:#E7E9E3;
+  --papel:#FBFBF8;
+  --intaglio:#0E5548;
+  --carmin:#96263F;
+  --ambar:#8E6412;
+  --grafito:#5C6670;
+  --linea:rgba(16,24,33,.13);
+  --linea-fuerte:rgba(16,24,33,.24);
+
+  --display:'Bodoni Moda','Didot',Georgia,serif;
+  --sans:'IBM Plex Sans',system-ui,sans-serif;
+  --mono:'IBM Plex Mono',ui-monospace,monospace;
+
+  --r-l:20px; --r-m:14px; --r-s:10px;
+}
+*{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
+html,body{height:100%}
+body{
+  background:var(--tinta);
+  font-family:var(--sans);
+  color:var(--hueso);
+  display:flex;align-items:center;justify-content:center;gap:56px;
+  padding:40px 24px;
+  min-height:100%;
+}
+#backdrop{position:fixed;inset:0;z-index:0;overflow:hidden;pointer-events:none;opacity:.5}
+#backdrop svg{position:absolute;top:50%;left:50%;width:1500px;height:1500px;transform:translate(-50%,-50%)}
+
+/* ── device ───────────────────────────────────────────── */
+.device{
+  position:relative;z-index:1;
+  width:393px;height:852px;flex:none;
+  background:var(--hueso);
+  border-radius:46px;
+  border:9px solid #05090d;
+  box-shadow:0 40px 90px rgba(0,0,0,.6), 0 0 0 1px rgba(255,255,255,.07);
+  overflow:hidden;
+  color:var(--tinta);
+}
+.statusbar{
+  position:absolute;top:0;left:0;right:0;height:46px;z-index:40;
+  display:flex;align-items:center;justify-content:space-between;
+  padding:0 26px;font-size:13px;font-weight:600;letter-spacing:.2px;
+  pointer-events:none;mix-blend-mode:normal;color:inherit;
+}
+.statusbar .sb-right{display:flex;gap:5px;align-items:center;opacity:.8}
+.sb-bar{width:3px;background:currentColor;border-radius:1px}
+.screen{
+  position:absolute;inset:0;
+  display:flex;flex-direction:column;
+  padding:46px 0 0;
+  opacity:0;transform:translateY(8px);pointer-events:none;
+  transition:opacity .26s ease, transform .26s ease;
+}
+.screen.on{opacity:1;transform:none;pointer-events:auto}
+.screen.dark{background:var(--tinta);color:var(--hueso)}
+.pad{padding-left:24px;padding-right:24px}
+.grow{flex:1;min-height:0}
+.scroll{overflow-y:auto;-webkit-overflow-scrolling:touch}
+
+/* ── type ─────────────────────────────────────────────── */
+.eyebrow{
+  font-family:var(--mono);font-size:10.5px;letter-spacing:.16em;
+  text-transform:uppercase;color:var(--grafito);
+}
+.screen.dark .eyebrow{color:rgba(231,233,227,.55)}
+.display{
+  font-family:var(--display);font-weight:400;line-height:1.06;
+  letter-spacing:-.01em;font-size:38px;
+}
+.display em{font-style:italic}
+.h2{font-family:var(--display);font-size:26px;font-weight:400;line-height:1.15}
+.body{font-size:14.5px;line-height:1.55;color:var(--grafito)}
+.screen.dark .body{color:rgba(231,233,227,.68)}
+.mono{font-family:var(--mono);font-size:12px;letter-spacing:-.01em}
+.tiny{font-size:11.5px;line-height:1.45;color:var(--grafito)}
+
+/* ── controls ─────────────────────────────────────────── */
+.btn{
+  display:flex;align-items:center;justify-content:center;gap:9px;
+  width:100%;height:54px;border:0;border-radius:var(--r-m);
+  font-family:var(--sans);font-size:15px;font-weight:600;letter-spacing:.005em;
+  background:var(--intaglio);color:#F4F6F2;cursor:pointer;
+  transition:transform .12s ease, filter .16s ease;
+}
+.btn:active{transform:scale(.985)}
+.btn:hover{filter:brightness(1.08)}
+.btn.ghost{background:transparent;color:var(--tinta);box-shadow:inset 0 0 0 1px var(--linea-fuerte);font-weight:500}
+.btn.ghost:hover{filter:none;background:rgba(16,24,33,.04)}
+.btn.peligro{background:transparent;color:var(--carmin);box-shadow:inset 0 0 0 1px rgba(150,38,63,.4)}
+.btn.peligro:hover{background:rgba(150,38,63,.06);filter:none}
+.btn.claro{background:var(--hueso);color:var(--tinta)}
+.btn.sm{height:42px;font-size:13.5px;border-radius:var(--r-s);width:auto;padding:0 16px}
+.link{
+  background:none;border:0;font-family:var(--sans);font-size:13.5px;font-weight:500;
+  color:var(--grafito);cursor:pointer;padding:10px;text-decoration:underline;
+  text-underline-offset:3px;text-decoration-thickness:1px;
+}
+.link:hover{color:var(--tinta)}
+:focus-visible{outline:2px solid var(--intaglio);outline-offset:3px;border-radius:4px}
+.screen.dark :focus-visible{outline-color:var(--hueso)}
+.iconbtn{
+  width:40px;height:40px;border-radius:50%;border:0;background:transparent;
+  display:grid;place-items:center;cursor:pointer;color:inherit;flex:none;
+}
+.iconbtn:hover{background:rgba(16,24,33,.06)}
+.screen.dark .iconbtn:hover{background:rgba(231,233,227,.1)}
+
+/* ── pieces ───────────────────────────────────────────── */
+.appbar{display:flex;align-items:center;gap:6px;height:56px;padding:0 14px 0 24px}
+.wordmark{font-family:var(--display);font-size:19px;letter-spacing:.14em;font-weight:500}
+.rule{height:1px;background:var(--linea);border:0}
+.card{background:var(--papel);border-radius:var(--r-l);box-shadow:inset 0 0 0 1px var(--linea)}
+.pill{
+  display:inline-flex;align-items:center;gap:6px;height:26px;padding:0 11px;
+  border-radius:999px;font-size:11.5px;font-weight:600;letter-spacing:.01em;
+}
+.pill.ok{background:rgba(14,85,72,.1);color:var(--intaglio)}
+.pill.mal{background:rgba(150,38,63,.1);color:var(--carmin)}
+.pill.esp{background:rgba(142,100,18,.12);color:var(--ambar)}
+.dot{width:6px;height:6px;border-radius:50%;background:currentColor}
+.fila{display:flex;align-items:baseline;justify-content:space-between;gap:16px;padding:13px 0}
+.fila + .fila{border-top:1px solid var(--linea)}
+.fila dt{font-size:12.5px;color:var(--grafito);flex:none}
+.fila dd{font-size:13.5px;font-weight:500;text-align:right;overflow-wrap:anywhere}
+
+/* rosette holders */
+.rosette{display:block}
+.spin-a{transform-origin:50% 50%;animation:spin 64s linear infinite}
+.spin-b{transform-origin:50% 50%;animation:spin 44s linear infinite reverse}
+.spin-c{transform-origin:50% 50%;animation:spin 96s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+
+/* ── welcome ──────────────────────────────────────────── */
+#s-bienvenida{justify-content:flex-end}
+.hero-seal{position:absolute;top:34px;left:50%;transform:translateX(-50%);opacity:.9;pointer-events:none}
+
+/* ── home ─────────────────────────────────────────────── */
+.emblema{position:relative;display:grid;place-items:center;padding:6px 0 2px}
+.emblema .centro{position:absolute;display:grid;place-items:center;text-align:center;gap:2px}
+.emblema .centro .k{font-family:var(--mono);font-size:11px;color:var(--tinta);letter-spacing:.02em}
+.actividad li{display:flex;gap:12px;align-items:flex-start;padding:12px 0;list-style:none}
+.actividad li + li{border-top:1px solid var(--linea)}
+.actividad .marca{width:7px;height:7px;border-radius:50%;margin-top:6px;flex:none}
+.actividad .qué{font-size:13.5px;font-weight:500}
+.actividad .cuándo{font-size:11.5px;color:var(--grafito);margin-top:2px}
+
+/* ── scanner ──────────────────────────────────────────── */
+#s-escaner{padding-top:0}
+.camara{position:absolute;inset:0;background:radial-gradient(120% 90% at 50% 42%,#232b33 0%,#0b1116 70%,#070c10 100%)}
+.camara::after{content:"";position:absolute;inset:0;background:
+  repeating-linear-gradient(0deg,rgba(255,255,255,.022) 0 1px,transparent 1px 3px);}
+.pantalla-web{
+  position:absolute;left:50%;top:39%;transform:translate(-50%,-50%) rotate(-1.4deg);
+  width:210px;background:#dfe2dd;border-radius:8px;padding:7px;
+  box-shadow:0 22px 50px rgba(0,0,0,.55);
+}
+.pantalla-web .barra{display:flex;gap:4px;padding:0 0 7px 2px}
+.pantalla-web .barra i{width:5px;height:5px;border-radius:50%;background:#a8ada6;display:block}
+.pantalla-web .lienzo{background:#fff;border-radius:4px;padding:14px;display:grid;place-items:center;gap:9px}
+.pantalla-web .rotulo{font-size:8px;letter-spacing:.1em;text-transform:uppercase;color:#7d857d;font-family:var(--mono)}
+.reticula{position:absolute;left:50%;top:39%;transform:translate(-50%,-50%);pointer-events:none;transition:transform .5s cubic-bezier(.2,.8,.2,1),opacity .4s}
+#s-escaner.detectado .reticula{transform:translate(-50%,-50%) scale(.74)}
+.escaner-cabecera{position:relative;z-index:3;display:flex;align-items:center;gap:6px;height:56px;padding:0 14px 0 10px;margin-top:46px}
+.escaner-pie{position:relative;z-index:3;margin-top:auto;padding:22px 24px 34px;
+  background:linear-gradient(to top,rgba(7,12,16,.96),rgba(7,12,16,0))}
+.checks{display:grid;gap:2px;margin-bottom:16px}
+.check{display:flex;align-items:center;gap:10px;font-size:13px;opacity:.28;transition:opacity .3s ease;padding:5px 0}
+.check.on{opacity:1}
+.check .caja{width:17px;height:17px;border-radius:5px;flex:none;display:grid;place-items:center;
+  box-shadow:inset 0 0 0 1px rgba(231,233,227,.28);transition:background .3s,box-shadow .3s}
+.check.on .caja{background:var(--hueso);box-shadow:none}
+.check.on.err .caja{background:#D9576F}
+.check svg{opacity:0;transition:opacity .2s .1s}
+.check.on svg{opacity:1}
+
+/* ── approval ─────────────────────────────────────────── */
+.reto{
+  font-family:var(--mono);font-size:11.5px;line-height:1.7;
+  background:rgba(16,24,33,.045);border-radius:var(--r-s);padding:11px 12px;
+  overflow-wrap:anywhere;color:var(--grafito);
+}
+.origen{font-family:var(--display);font-size:29px;line-height:1.1}
+.cuenta-atras{font-family:var(--mono);font-size:12px;font-weight:500}
+.cuenta-atras.urgente{color:var(--carmin)}
+.acciones{display:grid;gap:10px;padding:16px 24px 30px;background:var(--hueso);
+  box-shadow:0 -1px 0 var(--linea)}
+
+/* ── done ─────────────────────────────────────────────── */
+.sello-final{display:grid;place-items:center;position:relative}
+.sello-final .marca{position:absolute}
+.trazo{stroke-dasharray:var(--len);stroke-dashoffset:var(--len);animation:trazar 1.5s ease forwards}
+@keyframes trazar{to{stroke-dashoffset:0}}
+.aparece{animation:aparece .5s .5s both ease}
+@keyframes aparece{from{opacity:0;transform:scale(.9)}to{opacity:1;transform:none}}
+
+/* ── system sheet (Credential Manager) ────────────────── */
+.velo{position:absolute;inset:0;background:rgba(6,10,14,.5);z-index:50;opacity:0;pointer-events:none;transition:opacity .22s}
+.velo.on{opacity:1;pointer-events:auto}
+.hoja{
+  position:absolute;left:0;right:0;bottom:0;z-index:51;
+  background:#fff;color:#1b1b1f;border-radius:28px 28px 0 0;padding:26px 24px 30px;
+  font-family:Roboto,system-ui,sans-serif;
+  transform:translateY(102%);transition:transform .3s cubic-bezier(.2,.8,.2,1);
+  box-shadow:0 -10px 40px rgba(0,0,0,.25);
+}
+.hoja.on{transform:none}
+.hoja h4{font-size:19px;font-weight:500;text-align:center;margin-bottom:6px}
+.hoja p{font-size:13.5px;color:#45474d;text-align:center;line-height:1.5}
+.cara{width:70px;height:70px;margin:4px auto 18px;display:grid;place-items:center}
+.cara svg{animation:latir 1.5s ease-in-out infinite}
+@keyframes latir{0%,100%{opacity:.45;transform:scale(.96)}50%{opacity:1;transform:scale(1)}}
+.hoja .sys-btn{display:block;margin:20px auto 0;border:0;background:none;color:#0b57d0;
+  font-size:14px;font-weight:600;font-family:inherit;cursor:pointer;padding:10px 18px;border-radius:20px}
+.hoja .sys-btn:hover{background:#f0f4fb}
+.sys-nota{position:absolute;top:-26px;left:50%;transform:translateX(-50%);
+  font-family:var(--mono);font-size:9.5px;letter-spacing:.14em;text-transform:uppercase;color:rgba(231,233,227,.5);white-space:nowrap}
+
+/* ── dialog ───────────────────────────────────────────── */
+.dialogo{
+  position:absolute;left:24px;right:24px;top:50%;transform:translateY(-46%) scale(.97);
+  z-index:52;background:var(--papel);border-radius:var(--r-l);padding:24px;
+  opacity:0;pointer-events:none;transition:opacity .2s,transform .2s;
+  box-shadow:0 20px 50px rgba(0,0,0,.3);
+}
+.dialogo.on{opacity:1;pointer-events:auto;transform:translateY(-50%) scale(1)}
+
+/* ── prototype rail ───────────────────────────────────── */
+.rail{position:relative;z-index:1;width:214px;flex:none;display:flex;flex-direction:column;gap:22px}
+.rail h1{font-family:var(--display);font-size:23px;font-weight:400;line-height:1.15}
+.rail p{font-size:12.5px;line-height:1.6;color:rgba(231,233,227,.6)}
+.rail .grupo{display:flex;flex-direction:column;gap:7px}
+.rail .rot{font-family:var(--mono);font-size:9.5px;letter-spacing:.16em;text-transform:uppercase;color:rgba(231,233,227,.4);margin-bottom:3px}
+.rail button{
+  text-align:left;background:transparent;border:0;color:rgba(231,233,227,.72);
+  font-family:var(--mono);font-size:11.5px;padding:7px 10px;border-radius:7px;cursor:pointer;
+  box-shadow:inset 0 0 0 1px rgba(231,233,227,.13);transition:.15s;
+}
+.rail button:hover{color:#fff;box-shadow:inset 0 0 0 1px rgba(231,233,227,.4)}
+.rail button.act{background:var(--hueso);color:var(--tinta);box-shadow:none;font-weight:500}
+.paleta{display:flex;gap:5px}
+.paleta i{width:20px;height:20px;border-radius:5px;display:block;box-shadow:inset 0 0 0 1px rgba(255,255,255,.14)}
+
+@media (max-width:900px){
+  body{flex-direction:column;gap:28px;padding:20px 14px}
+  .rail{width:min(393px,100%)}
+}
+@media (prefers-reduced-motion:reduce){
+  *{animation-duration:.001ms !important;animation-iteration-count:1 !important;transition-duration:.05s !important}
+}
+</style>
+
+<div id="backdrop"><svg id="bg-rosette" viewBox="0 0 600 600" aria-hidden="true"></svg></div>
+
+<div class="device" role="application" aria-label="Prototipo de la app Sello">
+  <div class="statusbar" id="statusbar">
+    <span>9:41</span>
+    <span class="sb-right" aria-hidden="true">
+      <span class="sb-bar" style="height:6px"></span>
+      <span class="sb-bar" style="height:8px"></span>
+      <span class="sb-bar" style="height:10px"></span>
+      <span style="width:20px;height:10px;border:1.5px solid currentColor;border-radius:3px;display:inline-block;position:relative">
+        <span style="position:absolute;inset:1.5px;background:currentColor;border-radius:1px;right:6px"></span>
+      </span>
+    </span>
+  </div>
+
+  <!-- ══ BIENVENIDA ══ -->
+  <section class="screen dark on" id="s-bienvenida">
+    <div class="hero-seal"><svg id="ros-hero" width="393" height="393" viewBox="0 0 600 600" aria-hidden="true"></svg></div>
+    <div class="pad" style="padding-bottom:34px;position:relative">
+      <p class="eyebrow" style="margin-bottom:16px">Identidad del dispositivo</p>
+      <h1 class="display" style="margin-bottom:14px">Tu firma vive<br>en <em>este</em> teléfono.</h1>
+      <p class="body" style="max-width:300px;margin-bottom:26px">
+        Se crea dentro del chip seguro y no puede salir de él. Cada vez que apruebas algo, firmas con tu rostro.
+      </p>
+      <button class="btn claro" onclick="bio('Crear tu identidad de firma',()=>ir('s-inicio'))">Crear identidad</button>
+      <div style="display:grid;place-items:center;margin-top:4px">
+        <button class="link" style="color:rgba(231,233,227,.6)" onclick="bio('Iniciar sesión en Sello',()=>ir('s-inicio'))">Ya tengo una cuenta</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- ══ INICIO ══ -->
+  <section class="screen" id="s-inicio">
+    <div class="appbar">
+      <span class="wordmark grow">SELLO</span>
+      <button class="iconbtn" onclick="ir('s-cuenta')" aria-label="Tu dispositivo">
+        <svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6">
+          <rect x="6" y="2.5" width="12" height="19" rx="2.5"/><path d="M10.5 18.5h3"/>
+        </svg>
+      </button>
+    </div>
+
+    <div class="pad grow scroll">
+      <div class="emblema">
+        <svg id="ros-emblema" width="250" height="250" viewBox="0 0 600 600" aria-hidden="true"></svg>
+        <div class="centro">
+          <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="#0E5548" stroke-width="1.5">
+            <rect x="4.5" y="10.5" width="15" height="10" rx="2.5"/>
+            <path d="M8 10.5V7.5a4 4 0 0 1 8 0v3"/>
+          </svg>
+          <span class="k" style="margin-top:6px">a4f1··9c02</span>
+        </div>
+      </div>
+
+      <div style="display:grid;place-items:center;gap:9px;margin:2px 0 26px">
+        <span class="pill ok"><span class="dot"></span>Clave activa</span>
+        <p class="tiny" style="text-align:center;max-width:250px">
+          Protegida por el hardware del teléfono. Pide tu rostro en cada firma.
+        </p>
+      </div>
+
+      <button class="btn" onclick="escanear()">
+        <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7">
+          <path d="M3 8V5.5A2.5 2.5 0 0 1 5.5 3H8M16 3h2.5A2.5 2.5 0 0 1 21 5.5V8M21 16v2.5a2.5 2.5 0 0 1-2.5 2.5H16M8 21H5.5A2.5 2.5 0 0 1 3 18.5V16"/>
+          <path d="M7 12h10"/>
+        </svg>
+        Escanear código
+      </button>
+
+      <p class="eyebrow" style="margin:32px 0 4px">Últimas aprobaciones</p>
+      <ul class="actividad">
+        <li><span class="marca" style="background:var(--intaglio)"></span>
+          <div class="grow"><div class="qué">Ingreso a xami.run</div><div class="cuándo">Hoy, 8:12 · Aprobado</div></div></li>
+        <li><span class="marca" style="background:var(--intaglio)"></span>
+          <div class="grow"><div class="qué">Firma de contrato-marco.pdf</div><div class="cuándo">Ayer, 19:40 · Aprobado</div></div></li>
+        <li><span class="marca" style="background:var(--carmin)"></span>
+          <div class="grow"><div class="qué">Ingreso a xami.run</div><div class="cuándo">Ayer, 3:07 · Rechazado por ti</div></div></li>
+      </ul>
+      <div style="height:28px"></div>
+    </div>
+  </section>
+
+  <!-- ══ ESCÁNER ══ -->
+  <section class="screen dark" id="s-escaner">
+    <div class="camara" aria-hidden="true"></div>
+    <div class="pantalla-web" aria-hidden="true">
+      <div class="barra"><i></i><i></i><i></i></div>
+      <div class="lienzo">
+        <span class="rotulo">xami.run</span>
+        <svg id="qr-mock" width="96" height="96" viewBox="0 0 21 21" shape-rendering="crispEdges"></svg>
+        <span class="rotulo" style="font-size:7px">Escanea para continuar</span>
+      </div>
+    </div>
+    <svg class="reticula" id="ros-reticula" width="290" height="290" viewBox="0 0 600 600" aria-hidden="true"></svg>
+
+    <div class="escaner-cabecera">
+      <button class="iconbtn" onclick="cancelarEscaneo()" aria-label="Volver">
+        <svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M15 5l-7 7 7 7"/></svg>
+      </button>
+      <span style="font-size:14.5px;font-weight:500">Escanea el código del sitio</span>
+    </div>
+
+    <div class="escaner-pie">
+      <div class="checks" id="checks">
+        <div class="check" data-c="1"><span class="caja">${'' }<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="#101821" stroke-width="3.2"><path d="M4 12.5l5.5 5.5L20 7"/></svg></span> Firma del emisor</div>
+        <div class="check" data-c="2"><span class="caja"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="#101821" stroke-width="3.2"><path d="M4 12.5l5.5 5.5L20 7"/></svg></span> Vigencia del código</div>
+        <div class="check" data-c="3"><span class="caja"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="#101821" stroke-width="3.2"><path d="M4 12.5l5.5 5.5L20 7"/></svg></span> Sesión abierta en el sitio</div>
+      </div>
+      <p class="body" id="pie-texto" style="font-size:13px">Apunta al código que aparece en la pantalla del sitio.</p>
+    </div>
+  </section>
+
+  <!-- ══ NO VERIFICADO ══ -->
+  <section class="screen" id="s-invalido">
+    <div class="appbar"><span class="grow"></span>
+      <button class="iconbtn" onclick="ir('s-inicio')" aria-label="Cerrar">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M6 6l12 12M18 6L6 18"/></svg>
+      </button>
+    </div>
+    <div class="pad grow" style="display:flex;flex-direction:column;justify-content:center;gap:20px;padding-bottom:40px">
+      <svg width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="var(--carmin)" stroke-width="1.4">
+        <circle cx="12" cy="12" r="9.2"/><path d="M12 7.5v5.2M12 16.3v.2"/>
+      </svg>
+      <h2 class="h2">Este código no está firmado por un emisor autorizado.</h2>
+      <p class="body">Puede haber sido alterado o venir de un sitio que suplanta a otro. No se abrió ninguna conexión y no se firmó nada.</p>
+      <div class="card pad" style="padding-top:4px;padding-bottom:4px">
+        <dl>
+          <div class="fila"><dt>Emisor declarado</dt><dd class="mono">e7c2··11ab</dd></div>
+          <div class="fila"><dt>En tu lista de confianza</dt><dd style="color:var(--carmin)">No aparece</dd></div>
+        </dl>
+      </div>
+    </div>
+    <div class="acciones">
+      <button class="btn" onclick="escanear()">Escanear otro código</button>
+      <button class="btn ghost" onclick="ir('s-inicio')">Volver al inicio</button>
+    </div>
+  </section>
+
+  <!-- ══ APROBACIÓN ══ -->
+  <section class="screen" id="s-aprobacion">
+    <div class="appbar">
+      <span class="pill ok grow" style="max-width:max-content"><span class="dot"></span>Canal cifrado con el sitio</span>
+      <button class="iconbtn" onclick="rechazar()" aria-label="Cerrar">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M6 6l12 12M18 6L6 18"/></svg>
+      </button>
+    </div>
+
+    <div class="pad grow scroll">
+      <p class="eyebrow" style="margin-bottom:10px">Solicita tu aprobación</p>
+      <h2 class="origen" style="margin-bottom:6px">xami.run</h2>
+      <p class="body" style="margin-bottom:22px">Quiere iniciar sesión como <strong style="color:var(--tinta);font-weight:600">estefano@xami.run</strong>.</p>
+
+      <div class="card pad" style="padding-top:4px;padding-bottom:6px;margin-bottom:14px">
+        <dl>
+          <div class="fila"><dt>Desde</dt><dd>Chrome · Windows</dd></div>
+          <div class="fila"><dt>Ubicación aproximada</dt><dd>Lima, Perú</dd></div>
+          <div class="fila"><dt>Emisor del código</dt><dd><span class="pill ok" style="height:22px"><span class="dot"></span>Verificado</span></dd></div>
+          <div class="fila"><dt>Caduca en</dt><dd><span class="cuenta-atras" id="reloj">1:59</span></dd></div>
+        </dl>
+      </div>
+
+      <p class="eyebrow" style="margin-bottom:7px">Reto que vas a firmar</p>
+      <p class="reto" style="margin-bottom:14px">9f2c 4ab8 e310 77d5 · 6c01 ff9a 2e44 b8d3<br>81ae 05c7 d692 3f10 · aa47 1b8e 90c5 62fd</p>
+      <p class="tiny" style="margin-bottom:26px">
+        Se firma dentro del chip seguro. Tu clave privada no se transmite ni sale del teléfono.
+      </p>
+    </div>
+
+    <div class="acciones">
+      <button class="btn" onclick="bio('Aprobar el ingreso a xami.run',firmar)">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 12.5l5.5 5.5L20 7"/></svg>
+        Aprobar con tu rostro
+      </button>
+      <button class="btn peligro" onclick="rechazar()">Rechazar</button>
+    </div>
+  </section>
+
+  <!-- ══ FIRMADO ══ -->
+  <section class="screen" id="s-firmado">
+    <div class="grow" style="display:grid;place-items:center;padding:0 24px">
+      <div class="sello-final">
+        <svg id="ros-sello" width="252" height="252" viewBox="0 0 600 600" aria-hidden="true"></svg>
+        <div class="marca aparece" style="display:grid;place-items:center;gap:10px;text-align:center">
+          <svg width="38" height="38" viewBox="0 0 24 24" fill="none" stroke="var(--intaglio)" stroke-width="1.5"><path d="M4 12.5l5.5 5.5L20 7"/></svg>
+        </div>
+      </div>
+      <div style="text-align:center;margin-top:-6px" class="aparece">
+        <h2 class="h2" style="margin-bottom:8px">Aprobado</h2>
+        <p class="body" style="max-width:270px;margin:0 auto 18px">Ya puedes volver a la pantalla del sitio. La sesión se abrió allí.</p>
+        <p class="mono" style="color:var(--grafito)">firma 3045··8b71 · clave a4f1··9c02</p>
+      </div>
+    </div>
+    <div class="acciones"><button class="btn ghost" onclick="ir('s-inicio')">Listo</button></div>
+  </section>
+
+  <!-- ══ CUENTA / DISPOSITIVO ══ -->
+  <section class="screen" id="s-cuenta">
+    <div class="appbar">
+      <button class="iconbtn" onclick="ir('s-inicio')" aria-label="Volver" style="margin-left:-8px">
+        <svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M15 5l-7 7 7 7"/></svg>
+      </button>
+      <span style="font-size:15px;font-weight:600" class="grow">Este dispositivo</span>
+    </div>
+    <div class="pad grow scroll">
+      <div class="card pad" style="padding-top:4px;padding-bottom:6px;margin-bottom:22px">
+        <dl>
+          <div class="fila"><dt>Clave de firma</dt><dd class="mono">a4f1e8d3··9c02</dd></div>
+          <div class="fila"><dt>Creada</dt><dd>12 ago 2026</dd></div>
+          <div class="fila"><dt>Protección</dt><dd>Hardware + rostro</dd></div>
+          <div class="fila"><dt>Emisores de confianza</dt><dd>Al día · hace 12 min</dd></div>
+        </dl>
+      </div>
+
+      <p class="eyebrow" style="margin-bottom:10px">Sesión</p>
+      <button class="btn ghost" style="margin-bottom:10px" onclick="ir('s-bienvenida')">Cerrar sesión</button>
+      <p class="tiny" style="margin-bottom:30px">Sales de la app. Tu clave de firma se queda en el teléfono, así que la próxima vez solo necesitas tu rostro.</p>
+
+      <hr class="rule" style="margin-bottom:22px">
+
+      <p class="eyebrow" style="margin-bottom:10px">Retirar el dispositivo</p>
+      <button class="btn peligro" style="margin-bottom:10px" onclick="dlg(true)">Eliminar esta identidad</button>
+      <p class="tiny">Borra la clave del chip seguro y desvincula el teléfono. Es permanente: para volver a aprobar desde aquí, tendrás que crear una identidad nueva.</p>
+      <div style="height:30px"></div>
+    </div>
+  </section>
+
+  <!-- diálogo -->
+  <div class="velo" id="velo-dlg" onclick="dlg(false)"></div>
+  <div class="dialogo" id="dialogo" role="alertdialog" aria-modal="true">
+    <h3 class="h2" style="font-size:22px;margin-bottom:10px">¿Eliminar esta identidad?</h3>
+    <p class="body" style="margin-bottom:20px">La clave se borra del chip seguro y no se puede recuperar. Las sesiones que aprobaste seguirán siendo válidas hasta que caduquen.</p>
+    <div style="display:grid;gap:8px">
+      <button class="btn peligro" onclick="bio('Eliminar tu identidad de firma',()=>{dlg(false);ir('s-bienvenida')})">Sí, eliminar</button>
+      <button class="btn ghost" onclick="dlg(false)">Cancelar</button>
+    </div>
+  </div>
+
+  <!-- hoja del sistema -->
+  <div class="velo" id="velo-bio"></div>
+  <div class="hoja" id="hoja-bio" role="dialog" aria-modal="true">
+    <span class="sys-nota">Interfaz del sistema · Credential Manager</span>
+    <div class="cara">
+      <svg width="60" height="60" viewBox="0 0 24 24" fill="none" stroke="#0b57d0" stroke-width="1.3">
+        <path d="M4 8.5V6a2 2 0 0 1 2-2h2.5M15.5 4H18a2 2 0 0 1 2 2v2.5M20 15.5V18a2 2 0 0 1-2 2h-2.5M8.5 20H6a2 2 0 0 1-2-2v-2.5"/>
+        <circle cx="9.6" cy="10.6" r=".7" fill="#0b57d0" stroke="none"/><circle cx="14.4" cy="10.6" r=".7" fill="#0b57d0" stroke="none"/>
+        <path d="M9.4 14.6a3.4 3.4 0 0 0 5.2 0"/>
+      </svg>
+    </div>
+    <h4 id="bio-titulo">Verifica tu identidad</h4>
+    <p id="bio-sub">Usa el desbloqueo facial para continuar</p>
+    <button class="sys-btn" onclick="cerrarBio()">Cancelar</button>
+  </div>
+</div>
+
+<!-- ══ carril de prototipo ══ -->
+<aside class="rail">
+  <div>
+    <h1>Sello</h1>
+    <p style="margin-top:8px">Prototipo navegable del flujo completo: passkey, escaneo verificado, aprobación por WebRTC y retiro del dispositivo.</p>
+  </div>
+  <div class="grupo">
+    <span class="rot">Pantallas</span>
+    <button data-s="s-bienvenida" onclick="ir('s-bienvenida')">01 · Bienvenida</button>
+    <button data-s="s-inicio" onclick="ir('s-inicio')">02 · Inicio</button>
+    <button data-s="s-escaner" onclick="escanear()">03 · Escáner</button>
+    <button data-s="s-invalido" onclick="escanear(true)">04 · No verificado</button>
+    <button data-s="s-aprobacion" onclick="aprobacion()">05 · Aprobación</button>
+    <button data-s="s-firmado" onclick="ir('s-firmado')">06 · Firmado</button>
+    <button data-s="s-cuenta" onclick="ir('s-cuenta')">07 · Dispositivo</button>
+  </div>
+  <div class="grupo">
+    <span class="rot">Paleta</span>
+    <div class="paleta">
+      <i style="background:#101821" title="tinta #101821"></i>
+      <i style="background:#E7E9E3" title="hueso #E7E9E3"></i>
+      <i style="background:#FBFBF8" title="papel #FBFBF8"></i>
+      <i style="background:#0E5548" title="intaglio #0E5548"></i>
+      <i style="background:#8E6412" title="ámbar #8E6412"></i>
+      <i style="background:#96263F" title="carmín #96263F"></i>
+    </div>
+    <p style="font-size:11px;margin-top:4px">Bodoni Moda · IBM Plex Sans · IBM Plex Mono</p>
+  </div>
+</aside>
+
+<script>
+/* ── guilloché: hipotrocoides encadenados, el motivo grabado de
+   los documentos de seguridad. Un solo elemento firma toda la app. ── */
+function trocoide(R,r,d,vueltas,pasos,cx,cy,esc){
+  let p='';
+  for(let i=0;i<=pasos;i++){
+    const t=(i/pasos)*Math.PI*2*vueltas;
+    const x=(R-r)*Math.cos(t)+d*Math.cos(((R-r)/r)*t);
+    const y=(R-r)*Math.sin(t)-d*Math.sin(((R-r)/r)*t);
+    p+=(i?'L':'M')+(cx+x*esc).toFixed(1)+' '+(cy+y*esc).toFixed(1);
+  }
+  return p;
+}
+function roseta(svg,anillos){
+  svg.innerHTML=anillos.map((a,i)=>{
+    const d=trocoide(1,a.r,a.d,a.v||12,a.p||900,300,300,a.esc);
+    return `<g class="${a.giro||''}"><path d="${d}" fill="none" stroke="${a.color}"
+      stroke-width="${a.w||.7}" stroke-opacity="${a.o}" stroke-linejoin="round"/></g>`;
+  }).join('');
+}
+const T='#101821', H='#E7E9E3', V='#0E5548';
+
+roseta(document.getElementById('bg-rosette'),[
+  {r:.211,d:.62,esc:290,color:H,o:.05,v:19,p:1500,w:.5,giro:'spin-a'},
+  {r:.317,d:.44,esc:250,color:H,o:.04,v:14,p:1100,w:.5,giro:'spin-b'}
+]);
+roseta(document.getElementById('ros-hero'),[
+  {r:.209,d:.58,esc:270,color:H,o:.16,v:19,p:1400,giro:'spin-a'},
+  {r:.313,d:.41,esc:222,color:H,o:.11,v:13,p:1000,giro:'spin-b'},
+  {r:.427,d:.33,esc:160,color:V,o:.85,v:9,p:800,w:.9,giro:'spin-c'}
+]);
+roseta(document.getElementById('ros-emblema'),[
+  {r:.209,d:.58,esc:272,color:T,o:.22,v:19,p:1400,giro:'spin-a'},
+  {r:.313,d:.41,esc:225,color:T,o:.16,v:13,p:1000,giro:'spin-b'},
+  {r:.427,d:.33,esc:158,color:V,o:.95,v:9,p:800,w:1.1,giro:'spin-c'}
+]);
+roseta(document.getElementById('ros-reticula'),[
+  {r:.209,d:.58,esc:272,color:H,o:.3,v:19,p:1400,giro:'spin-a'},
+  {r:.427,d:.33,esc:170,color:H,o:.75,v:9,p:800,w:1.2,giro:'spin-c'}
+]);
+
+/* QR simulado: patrones de posición + módulos deterministas */
+(function(){
+  const g=document.getElementById('qr-mock');let s='',seed=7;
+  const rnd=()=>(seed=(seed*1103515245+12345)%2147483648)/2147483648;
+  const finder=(x,y)=>{s+=`<rect x="${x}" y="${y}" width="7" height="7" fill="#101821"/>
+    <rect x="${x+1}" y="${y+1}" width="5" height="5" fill="#fff"/>
+    <rect x="${x+2}" y="${y+2}" width="3" height="3" fill="#101821"/>`;};
+  for(let y=0;y<21;y++)for(let x=0;x<21;x++){
+    const enF=(x<8&&y<8)||(x>12&&y<8)||(x<8&&y>12);
+    if(!enF&&rnd()>.52)s+=`<rect x="${x}" y="${y}" width="1" height="1" fill="#101821"/>`;
+  }
+  finder(0,0);finder(14,0);finder(0,14);
+  g.innerHTML=s;
+})();
+
+/* ── navegación ── */
+let temporizadores=[],reloj=null;
+function limpiar(){temporizadores.forEach(clearTimeout);temporizadores=[];clearInterval(reloj)}
+function ir(id){
+  limpiar();
+  document.querySelectorAll('.screen').forEach(s=>s.classList.toggle('on',s.id===id));
+  document.querySelectorAll('.rail button[data-s]').forEach(b=>b.classList.toggle('act',b.dataset.s===id));
+  const oscura=document.getElementById(id).classList.contains('dark');
+  document.getElementById('statusbar').style.color=oscura?'#E7E9E3':'#101821';
+  if(id==='s-aprobacion')contar(119);
+  if(id==='s-firmado')sellar();
+}
+
+/* ── escaneo ── */
+function escanear(fallar){
+  ir('s-escaner');
+  const p=document.getElementById('s-escaner');
+  p.classList.remove('detectado');
+  document.querySelectorAll('.check').forEach(c=>c.classList.remove('on','err'));
+  const pie=document.getElementById('pie-texto');
+  pie.textContent='Apunta al código que aparece en la pantalla del sitio.';
+  const en=(ms,f)=>temporizadores.push(setTimeout(f,ms));
+  en(1000,()=>{p.classList.add('detectado');pie.textContent='Código detectado. Comprobando su firma…'});
+  en(1550,()=>document.querySelector('[data-c="1"]').classList.add('on', ...(fallar?['err']:[])));
+  if(fallar){
+    en(1750,()=>pie.textContent='La firma no coincide con ningún emisor autorizado.');
+    en(2500,()=>ir('s-invalido'));
+  }else{
+    en(2100,()=>document.querySelector('[data-c="2"]').classList.add('on'));
+    en(2650,()=>{document.querySelector('[data-c="3"]').classList.add('on');pie.textContent='Abriendo conexión con xami.run…'});
+    en(3450,()=>ir('s-aprobacion'));
+  }
+}
+function cancelarEscaneo(){ir('s-inicio')}
+function aprobacion(){ir('s-aprobacion')}
+
+/* ── cuenta atrás ── */
+function contar(s){
+  const el=document.getElementById('reloj');
+  const pinta=()=>{
+    el.textContent=Math.floor(s/60)+':'+String(s%60).padStart(2,'0');
+    el.classList.toggle('urgente',s<=30);
+  };
+  pinta();
+  reloj=setInterval(()=>{s--;if(s<0){clearInterval(reloj);ir('s-inicio');return}pinta()},1000);
+}
+
+/* ── firma ── */
+function firmar(){ir('s-firmado')}
+function rechazar(){ir('s-inicio')}
+function sellar(){
+  const svg=document.getElementById('ros-sello');
+  roseta(svg,[
+    {r:.209,d:.58,esc:272,color:T,o:.18,v:19,p:1400},
+    {r:.427,d:.33,esc:160,color:V,o:1,v:9,p:800,w:1.2}
+  ]);
+  svg.querySelectorAll('path').forEach((p,i)=>{
+    const l=p.getTotalLength();
+    p.style.setProperty('--len',l);
+    p.classList.add('trazo');
+    p.style.animationDelay=(i*.15)+'s';
+    p.style.animationDuration=(1.2+i*.4)+'s';
+  });
+}
+
+/* ── hoja biométrica del sistema ── */
+let bioCb=null,bioT=null;
+function bio(titulo,cb){
+  bioCb=cb;
+  document.getElementById('bio-sub').textContent='Usa el desbloqueo facial · '+titulo;
+  document.getElementById('velo-bio').classList.add('on');
+  document.getElementById('hoja-bio').classList.add('on');
+  bioT=setTimeout(()=>{
+    document.getElementById('bio-titulo').textContent='Identidad verificada';
+    setTimeout(()=>{cerrarBio();bioCb&&bioCb()},450);
+  },1700);
+}
+function cerrarBio(){
+  clearTimeout(bioT);
+  document.getElementById('velo-bio').classList.remove('on');
+  document.getElementById('hoja-bio').classList.remove('on');
+  setTimeout(()=>document.getElementById('bio-titulo').textContent='Verifica tu identidad',300);
+}
+
+/* ── diálogo ── */
+function dlg(v){
+  document.getElementById('velo-dlg').classList.toggle('on',v);
+  document.getElementById('dialogo').classList.toggle('on',v);
+}
+
+ir('s-bienvenida');
+</script>
