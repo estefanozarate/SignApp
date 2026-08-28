@@ -22,9 +22,9 @@ import java.util.UUID
  *
  * La clave privada se genera dentro del AndroidKeyStore y nunca cruza el puente
  * a JavaScript: por aquí solo salen firmas y metadatos públicos. Cada uso exige
- * biometría fuerte (BiometricPrompt + CryptoObject), y si el usuario registra
- * una huella o un rostro nuevo, el sistema invalida la clave y hay que
- * re-emparejar el dispositivo.
+ * autenticación del usuario (BiometricPrompt + CryptoObject): biometría fuerte
+ * si el equipo la tiene, o el PIN/patrón del dispositivo si no. En equipos con
+ * biometría fuerte, registrar una huella nueva invalida la clave.
  */
 class SigningModule(private val ctx: ReactApplicationContext) : ReactContextBaseJavaModule(ctx) {
 
@@ -37,7 +37,11 @@ class SigningModule(private val ctx: ReactApplicationContext) : ReactContextBase
         const val PREF_CREADA = "creada_en"
         const val PREF_STRONGBOX = "strongbox"
         const val ANDROID_KEYSTORE = "AndroidKeyStore"
-        val AUTENTICADORES = BiometricManager.Authenticators.BIOMETRIC_STRONG
+        // Biometría fuerte (Class 3) o la credencial del dispositivo (PIN/patrón).
+        // El rostro Class 2 queda fuera a propósito: Android prohíbe usarlo con
+        // CryptoObject, porque una biometría débil no puede custodiar una clave.
+        val AUTENTICADORES = BiometricManager.Authenticators.BIOMETRIC_STRONG or
+            BiometricManager.Authenticators.DEVICE_CREDENTIAL
     }
 
     private val prefs by lazy { ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE) }
@@ -45,7 +49,7 @@ class SigningModule(private val ctx: ReactApplicationContext) : ReactContextBase
     private fun keystore(): KeyStore =
         KeyStore.getInstance(ANDROID_KEYSTORE).apply { load(null) }
 
-    // ── consulta ────────────────────────────────────────────────────────────
+    // ── consulta ──────────────────────────────────────────────────────
 
     @ReactMethod
     fun tieneIdentidad(promesa: Promise) {
@@ -70,7 +74,7 @@ class SigningModule(private val ctx: ReactApplicationContext) : ReactContextBase
         }
     }
 
-    // ── creación ────────────────────────────────────────────────────────────
+    // ── creación ─────────────────────────────────────────────────────
 
     /**
      * EC P-256, PURPOSE_SIGN, no exportable. Se intenta primero en StrongBox
@@ -81,10 +85,7 @@ class SigningModule(private val ctx: ReactApplicationContext) : ReactContextBase
         try {
             val disponible = BiometricManager.from(ctx).canAuthenticate(AUTENTICADORES)
             if (disponible != BiometricManager.BIOMETRIC_SUCCESS) {
-                promesa.reject(
-                    "E_SIN_BIOMETRIA",
-                    "Este teléfono no tiene biometría fuerte configurada. Actívala en Ajustes para poder firmar.",
-                )
+                promesa.reject("E_SIN_BLOQUEO", motivoSinBloqueo(disponible))
                 return
             }
 
@@ -92,7 +93,13 @@ class SigningModule(private val ctx: ReactApplicationContext) : ReactContextBase
             if (ks.containsAlias(ALIAS)) ks.deleteEntry(ALIAS)
 
             val keyId = UUID.randomUUID().toString()
-            val conStrongBox = generar(keyId, strongBox = true) || generar(keyId, strongBox = false)
+            // StrongBox primero; si el equipo no lo tiene, TEE. Si ambos fallan se
+            // propaga la causa real en vez de reportar un genérico.
+            val conStrongBox = try {
+                generar(keyId, strongBox = true); true
+            } catch (e: Exception) {
+                generar(keyId, strongBox = false); false
+            }
 
             prefs.edit()
                 .putString(PREF_KEY_ID, keyId)
@@ -106,40 +113,61 @@ class SigningModule(private val ctx: ReactApplicationContext) : ReactContextBase
         }
     }
 
-    private fun generar(keyId: String, strongBox: Boolean): Boolean {
-        if (strongBox && Build.VERSION.SDK_INT < Build.VERSION_CODES.P) return false
-        return try {
-            val spec = KeyGenParameterSpec.Builder(ALIAS, KeyProperties.PURPOSE_SIGN)
-                .setAlgorithmParameterSpec(ECGenParameterSpec("secp256r1"))
-                .setDigests(KeyProperties.DIGEST_SHA256)
-                .setUserAuthenticationRequired(true)
-                // El backend usa este challenge para atar la attestation a este pairing.
-                .setAttestationChallenge(keyId.toByteArray())
-                .apply {
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-                        // Una huella o un rostro nuevos invalidan la clave: la
-                        // identidad deja de ser válida si cambia quién puede abrir el teléfono.
-                        setInvalidatedByBiometricEnrollment(true)
-                    }
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                        // 0 segundos = autenticación por operación, no por tiempo.
-                        setUserAuthenticationParameters(0, KeyProperties.AUTH_BIOMETRIC_STRONG)
-                    } else {
-                        @Suppress("DEPRECATION")
-                        setUserAuthenticationValidityDurationSeconds(-1)
-                    }
-                    if (strongBox) setIsStrongBoxBacked(true)
-                }
-                .build()
-
-            KeyPairGenerator.getInstance(KeyProperties.KEY_ALGORITHM_EC, ANDROID_KEYSTORE)
-                .apply { initialize(spec) }
-                .generateKeyPair()
-            true
-        } catch (e: Exception) {
-            // StrongBoxUnavailableException y parientes: se reintenta sin StrongBox.
-            false
+    private fun generar(keyId: String, strongBox: Boolean) {
+        if (strongBox && Build.VERSION.SDK_INT < Build.VERSION_CODES.P) {
+            throw UnsupportedOperationException("StrongBox exige API 28+")
         }
+
+        // La invalidación por nueva biometría solo se pide si hay biometría
+        // fuerte matriculada: en un equipo que solo tiene PIN, exigirla hace
+        // fallar la generación de la clave.
+        val hayBiometriaFuerte = BiometricManager.from(ctx)
+            .canAuthenticate(BiometricManager.Authenticators.BIOMETRIC_STRONG) ==
+            BiometricManager.BIOMETRIC_SUCCESS
+
+        val spec = KeyGenParameterSpec.Builder(ALIAS, KeyProperties.PURPOSE_SIGN)
+            .setAlgorithmParameterSpec(ECGenParameterSpec("secp256r1"))
+            .setDigests(KeyProperties.DIGEST_SHA256)
+            .setUserAuthenticationRequired(true)
+            // La attestation queda disponible para que un verificador externo
+            // compruebe que la clave nació en hardware. Sin backend nadie la
+            // valida todavía, pero se genera igual.
+            .setAttestationChallenge(keyId.toByteArray())
+            .apply {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N && hayBiometriaFuerte) {
+                    // Una huella nueva invalida la clave. Cambiar el PIN no:
+                    // el sistema no lo trata como cambio de biometría.
+                    setInvalidatedByBiometricEnrollment(true)
+                }
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                    // 0 segundos = autenticación por operación, no por ventana de tiempo.
+                    setUserAuthenticationParameters(
+                        0,
+                        KeyProperties.AUTH_BIOMETRIC_STRONG or KeyProperties.AUTH_DEVICE_CREDENTIAL,
+                    )
+                } else {
+                    @Suppress("DEPRECATION")
+                    setUserAuthenticationValidityDurationSeconds(-1)
+                }
+                if (strongBox) setIsStrongBoxBacked(true)
+            }
+            .build()
+
+        KeyPairGenerator.getInstance(KeyProperties.KEY_ALGORITHM_EC, ANDROID_KEYSTORE)
+            .apply { initialize(spec) }
+            .generateKeyPair()
+    }
+
+    /** Traduce el código de canAuthenticate a algo que el usuario pueda accionar. */
+    private fun motivoSinBloqueo(codigo: Int): String = when (codigo) {
+        BiometricManager.BIOMETRIC_ERROR_NONE_ENROLLED ->
+            "Este dispositivo no tiene bloqueo de pantalla configurado. Añade un PIN, un patrón o una huella en Ajustes para poder firmar."
+        BiometricManager.BIOMETRIC_ERROR_NO_HARDWARE ->
+            "Este dispositivo no puede proteger la clave: no tiene bloqueo de pantalla ni sensor biométrico."
+        BiometricManager.BIOMETRIC_ERROR_HW_UNAVAILABLE ->
+            "El sensor no está disponible ahora mismo. Inténtalo de nuevo en un momento."
+        else ->
+            "No se pudo comprobar el bloqueo del dispositivo (código $codigo). Revisa el PIN o la huella en Ajustes."
     }
 
     private fun describir(ks: KeyStore): WritableMap {
@@ -159,7 +187,7 @@ class SigningModule(private val ctx: ReactApplicationContext) : ReactContextBase
         }
     }
 
-    // ── firma ───────────────────────────────────────────────────────────────
+    // ── firma ───────────────────────────────────────────────────────
 
     /**
      * El reto llega en base64 y se firma dentro del chip. El texto del prompt
@@ -230,7 +258,8 @@ class SigningModule(private val ctx: ReactApplicationContext) : ReactContextBase
                 .setTitle(titulo)
                 .setSubtitle(subtitulo)
                 .setDescription("Se firmará dentro del chip seguro. Tu clave no sale del teléfono.")
-                .setNegativeButtonText("Cancelar")
+                // Sin setNegativeButtonText: con DEVICE_CREDENTIAL permitido, el
+                // sistema pone su propio botón y declarar uno propio lanza excepción.
                 .setAllowedAuthenticators(AUTENTICADORES)
                 .setConfirmationRequired(true)
                 .build()
@@ -239,7 +268,7 @@ class SigningModule(private val ctx: ReactApplicationContext) : ReactContextBase
         }
     }
 
-    // ── borrado ─────────────────────────────────────────────────────────────
+    // ── borrado ────────────────────────────────────────────────────
 
     @ReactMethod
     fun borrarIdentidad(promesa: Promise) {

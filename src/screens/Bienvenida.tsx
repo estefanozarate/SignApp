@@ -24,11 +24,9 @@ export default function Bienvenida(_: Props) {
       await refrescar();
     } catch (e: any) {
       if (e instanceof BiometriaCancelada) return;
-      if (e?.code === 'E_SIN_BIOMETRIA') {
-        Alert.alert(
-          'Falta configurar la biometría',
-          'Sello firma con el chip seguro del teléfono, y eso exige tener huella o rostro registrados. Actívalo en Ajustes y vuelve.',
-        );
+      if (e?.code === 'E_SIN_BLOQUEO') {
+        // El módulo nativo ya distingue el motivo; aquí solo se muestra.
+        Alert.alert('Falta bloqueo de pantalla', e.message);
         return;
       }
       Alert.alert('No se pudo crear la identidad', e?.message ?? 'Error desconocido.');
@@ -49,8 +47,8 @@ export default function Bienvenida(_: Props) {
           Tu firma vive{'\n'}en este teléfono.
         </Display>
         <Cuerpo style={{ color: color.huesoTenue, maxWidth: 300, marginBottom: 26 }}>
-          Se crea dentro del chip seguro y no puede salir de él. No hay cuenta ni contraseña:
-          este teléfono es la identidad.
+          Se crea dentro del chip seguro y no puede salir de él. Para usarla te pedirá tu
+          huella o el PIN del dispositivo. No hay cuenta ni contraseña: este teléfono es la identidad.
         </Cuerpo>
 
         <Boton variante="claro" cargando={ocupado} onPress={crear}>
