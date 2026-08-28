@@ -1,31 +1,25 @@
-import AsyncStorage from '@react-native-async-storage/async-storage';
+import emisoresEmbebidos from '../emisores.json';
 
 export type Emisor = { kid: string; alg: 'ES256' | 'EdDSA'; spkiB64: string; nombre: string };
-
-const CLAVE = 'sello.trustlist';
 
 /**
  * Emisores autorizados a firmar QR.
  *
- * Sin backend no hay lista que descargar. Este módulo ya no toca la red: lee
- * lo que haya guardado en el dispositivo. Cómo entran ahí los emisores (lista
- * embebida en la app o confianza al primer uso) se decide en el commit 4;
- * mientras tanto la lista está vacía y todo QR se rechaza con
- * E_EMISOR_DESCONOCIDO, que es el fallo seguro correcto.
+ * La lista va compilada dentro de la app, no se descarga. Es deliberado:
+ * la alternativa (confiar en el primer emisor que aparece) acepta sin
+ * preguntar justo en el momento en que un suplantador atacaría, que es el
+ * primer escaneo. Aquí un emisor desconocido se rechaza siempre.
+ *
+ * El coste es que añadir un emisor exige publicar versión. Con emisores
+ * propios eso pasa cada varios años.
+ *
+ * Cuando hagan falta emisores de terceros, el paso siguiente no es TOFU
+ * sino una lista firmada que se descargue y se verifique contra una clave
+ * raíz embebida aquí.
  */
-export async function emisores(): Promise<Emisor[]> {
-  try {
-    const crudo = await AsyncStorage.getItem(CLAVE);
-    return crudo ? (JSON.parse(crudo) as Emisor[]) : [];
-  } catch {
-    return [];
-  }
+export function emisores(): Emisor[] {
+  return emisoresEmbebidos as Emisor[];
 }
 
-export async function guardarEmisores(lista: Emisor[]): Promise<void> {
-  await AsyncStorage.setItem(CLAVE, JSON.stringify(lista));
-}
-
-export async function olvidarEmisores(): Promise<void> {
-  await AsyncStorage.removeItem(CLAVE);
-}
+/** Para la pantalla de dispositivo: cuántos emisores reconoce esta versión. */
+export const cuantosEmisores = () => emisoresEmbebidos.length;
