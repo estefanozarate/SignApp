@@ -111,18 +111,12 @@ dependencies {
     // The version of react-native is set by the React Native Gradle Plugin
     implementation("com.facebook.react:react-android")
 
-    // Módulo A — passkeys vía Credential Manager
-    implementation("androidx.credentials:credentials:1.3.0")
-    implementation("androidx.credentials:credentials-play-services-auth:1.3.0")
-
-    // Módulo B — BiometricPrompt con CryptoObject sobre el AndroidKeyStore
+    // BiometricPrompt con CryptoObject sobre el AndroidKeyStore
     implementation("androidx.biometric:biometric:1.1.0")
 
-    // Módulo C — CBOR para COSE_Sign1; BouncyCastle solo para Ed25519
+    // CBOR para COSE_Sign1; BouncyCastle solo para Ed25519
     implementation("com.upokecenter:cbor:4.5.2")
     implementation("org.bouncycastle:bcprov-jdk18on:1.78.1")
-
-    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
 
     if (hermesEnabled.toBoolean()) {
         implementation("com.facebook.react:hermes-android")

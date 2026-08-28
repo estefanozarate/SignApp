@@ -1,12 +1,11 @@
 import { RTCIceCandidate, RTCPeerConnection, RTCSessionDescription } from 'react-native-webrtc';
 import { Signing } from '../native/Signing';
-import { tokenActual } from './api';
 
 /**
- * Módulo D — signaling + WebRTC.
+ * Signaling + WebRTC.
  * El teléfono siempre es el que contesta (answerer): el navegador que mostró
  * el QR crea la oferta y el DataChannel. Aquí no se transmite ningún secreto:
- * entra un reto, sale una firma.
+ * entra un reto, sale una firma. El relay solo ve el handshake.
  */
 
 export type Solicitud = {
@@ -42,9 +41,9 @@ export class SesionAprobacion {
   conectar() {
     this.ev.onEstado?.('conectando');
     const url = `${this.signalingUrl}?session_id=${encodeURIComponent(this.sessionId)}`;
-    this.ws = new WebSocket(url, undefined, {
-      headers: { Authorization: `Bearer ${tokenActual() ?? ''}` },
-    } as any);
+    // Sin backend no hay token: el session_id del QR es la única credencial,
+    // por eso tiene que ser largo, aleatorio y de vida corta.
+    this.ws = new WebSocket(url);
 
     this.ws.onerror = () => this.fallar(new Error('No se pudo abrir el canal con el sitio.'));
     this.ws.onclose = () => { if (!this.cerrada) this.ev.onEstado?.('cerrado'); };
