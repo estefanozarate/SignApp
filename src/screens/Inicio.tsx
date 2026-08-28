@@ -49,7 +49,7 @@ export default function Inicio({ navigation }: Props) {
             {identidad ? 'Clave activa' : 'Sin identidad'}
           </Pildora>
           <Minima style={{ textAlign: 'center', maxWidth: 250, marginTop: 9 }}>
-            Protegida por el hardware del teléfono. Pide tu rostro en cada firma.
+            Protegida por el hardware del teléfono. Pide tu huella o tu PIN en cada firma.
           </Minima>
         </View>
 
