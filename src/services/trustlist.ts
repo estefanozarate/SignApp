@@ -1,38 +1,31 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { pedir } from './api';
 
 export type Emisor = { kid: string; alg: 'ES256' | 'EdDSA'; spkiB64: string; nombre: string };
 
 const CLAVE = 'sello.trustlist';
-const VIGENCIA_MS = 6 * 60 * 60 * 1000;
-
-type Cache = { emisores: Emisor[]; traidaEn: number };
 
 /**
- * La lista de emisores se cachea para poder verificar el QR sin red
- * (nota transversal 3 de la arquitectura). Viene firmada por el backend;
- * el módulo nativo comprueba esa firma antes de aceptarla.
+ * Emisores autorizados a firmar QR.
+ *
+ * Sin backend no hay lista que descargar. Este módulo ya no toca la red: lee
+ * lo que haya guardado en el dispositivo. Cómo entran ahí los emisores (lista
+ * embebida en la app o confianza al primer uso) se decide en el commit 4;
+ * mientras tanto la lista está vacía y todo QR se rechaza con
+ * E_EMISOR_DESCONOCIDO, que es el fallo seguro correcto.
  */
-export async function emisores(forzar = false): Promise<Emisor[]> {
-  const crudo = await AsyncStorage.getItem(CLAVE);
-  const cache: Cache | null = crudo ? JSON.parse(crudo) : null;
-  const fresca = cache && Date.now() - cache.traidaEn < VIGENCIA_MS;
-  if (fresca && !forzar) return cache!.emisores;
-
+export async function emisores(): Promise<Emisor[]> {
   try {
-    const { issuers } = await pedir<{ issuers: Emisor[] }>('/trust-list');
-    await AsyncStorage.setItem(CLAVE, JSON.stringify({ emisores: issuers, traidaEn: Date.now() }));
-    return issuers;
-  } catch (e) {
-    if (cache) return cache.emisores; // sin red, seguimos con lo cacheado
-    throw e;
+    const crudo = await AsyncStorage.getItem(CLAVE);
+    return crudo ? (JSON.parse(crudo) as Emisor[]) : [];
+  } catch {
+    return [];
   }
 }
 
-export async function actualizadaHace(): Promise<number | null> {
-  const crudo = await AsyncStorage.getItem(CLAVE);
-  if (!crudo) return null;
-  return Date.now() - (JSON.parse(crudo) as Cache).traidaEn;
+export async function guardarEmisores(lista: Emisor[]): Promise<void> {
+  await AsyncStorage.setItem(CLAVE, JSON.stringify(lista));
 }
 
-export async function olvidarLista() { await AsyncStorage.removeItem(CLAVE); }
+export async function olvidarEmisores(): Promise<void> {
+  await AsyncStorage.removeItem(CLAVE);
+}

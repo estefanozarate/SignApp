@@ -24,7 +24,7 @@ const tema = {
 };
 
 function Rutero() {
-  const { cargando, autenticado, identidad } = useSesion();
+  const { cargando, identidad } = useSesion();
 
   if (cargando) {
     return (
@@ -34,7 +34,7 @@ function Rutero() {
     );
   }
 
-  const dentro = autenticado && identidad;
+  const dentro = identidad !== null;
 
   return (
     <Stack.Navigator screenOptions={{ headerShown: false, animation: 'fade_from_bottom' }}>

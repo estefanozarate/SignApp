@@ -1,3 +1,8 @@
-/** Cambia esto por tu backend. En debug, 10.0.2.2 es el host desde el emulador. */
-export const API = __DEV__ ? 'https://10.0.2.2:8443' : 'https://api.sello.example';
-export const RP_ID = 'sello.example';
+/**
+ * Sin backend: la identidad es local y no hay a quién registrarse.
+ * Lo único que queda del servidor es el relay de signaling, y su URL
+ * viene dentro del propio QR (claim "sgu"), no configurada aquí.
+ */
+
+/** Ventana máxima que se acepta entre la emisión del QR y el escaneo. */
+export const VIGENCIA_MAX_QR_S = 300;
