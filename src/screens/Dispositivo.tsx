@@ -7,8 +7,10 @@ import { Atras } from '../components/Iconos';
 import { color, espacio, radio, tipo } from '../theme';
 import { useSesion } from '../state/sesion';
 import { eliminarIdentidad } from '../services/identidad';
+import { BiometriaCancelada, ClaveInvalidada, Signing } from '../native/Signing';
+import { retoDePrueba } from '../lib/aleatorio';
 import { olvidarActividad } from '../services/actividad';
-import { olvidarEmisores } from '../services/trustlist';
+import { cuantosEmisores } from '../services/trustlist';
 import { Rutas } from '../navigation/tipos';
 
 type Props = NativeStackScreenProps<Rutas, 'Dispositivo'>;
@@ -17,13 +19,45 @@ export default function Dispositivo({ navigation }: Props) {
   const { identidad, refrescar } = useSesion();
   const [confirmando, setConfirmando] = useState(false);
   const [borrando, setBorrando] = useState(false);
+  const [firmando, setFirmando] = useState(false);
+  const [prueba, setPrueba] = useState<{ reto: string; firma: string } | null>(null);
+
+  /**
+   * Firma de prueba: comprueba de punta a punta que la clave del chip
+   * responde — prompt del sistema, firma dentro del hardware, y el caso de
+   * cancelación. No sale nada del teléfono; el reto se genera aquí mismo.
+   */
+  const firmarPrueba = async () => {
+    setFirmando(true);
+    setPrueba(null);
+    try {
+      const reto = retoDePrueba();
+      const { firmaDerB64 } = await Signing.firmar(
+        reto,
+        'Firma de prueba',
+        'Solo para comprobar que el chip responde',
+      );
+      setPrueba({ reto, firma: firmaDerB64 });
+    } catch (e: any) {
+      if (e instanceof BiometriaCancelada) return;
+      if (e instanceof ClaveInvalidada) {
+        Alert.alert(
+          'Hay que crear la identidad de nuevo',
+          'La biometría del dispositivo cambió, así que la clave anterior quedó invalidada.',
+        );
+        return;
+      }
+      Alert.alert('No se pudo firmar', e?.message ?? 'Error desconocido.');
+    } finally {
+      setFirmando(false);
+    }
+  };
 
   const eliminar = async () => {
     setBorrando(true);
     try {
       await eliminarIdentidad();
       await olvidarActividad();
-      await olvidarEmisores();
       setConfirmando(false);
       await refrescar();
     } catch (e: any) {
@@ -58,11 +92,31 @@ export default function Dispositivo({ navigation }: Props) {
             {identidad?.strongBox ? 'StrongBox + biometría' : 'Hardware + biometría'}
           </Fila>
           <Fila etiqueta="Algoritmo">{identidad?.algoritmo ?? '—'}</Fila>
+          <Fila etiqueta="Emisores reconocidos">{`${cuantosEmisores()}`}</Fila>
         </Tarjeta>
 
         <Minima style={{ marginBottom: 30 }}>
           La clave se generó en este teléfono y nunca sale de él. No hay servidor donde esté
           registrada, ni copia que se pueda restaurar.
+        </Minima>
+
+        <Ceja style={{ marginBottom: 10 }}>Comprobar la clave</Ceja>
+        <Boton variante="fantasma" cargando={firmando} deshabilitado={!identidad} onPress={firmarPrueba}>
+          Firmar un reto de prueba
+        </Boton>
+        {prueba ? (
+          <Tarjeta style={{ marginTop: 12 }}>
+            <Fila etiqueta="Reto" primera>
+              <Mono>{corto(prueba.reto)}</Mono>
+            </Fila>
+            <Fila etiqueta="Firma">
+              <Mono>{corto(prueba.firma)}</Mono>
+            </Fila>
+          </Tarjeta>
+        ) : null}
+        <Minima style={{ marginTop: 10, marginBottom: 30 }}>
+          Genera un reto en el teléfono y lo firma dentro del chip. Nada sale del dispositivo:
+          sirve para confirmar que la clave sigue viva y que pide tu huella o tu PIN.
         </Minima>
 
         <Ceja style={{ marginBottom: 10 }}>Retirar el dispositivo</Ceja>
@@ -93,6 +147,8 @@ export default function Dispositivo({ navigation }: Props) {
     </Pantalla>
   );
 }
+
+const corto = (v: string) => `${v.slice(0, 8)}··${v.slice(-6)}`;
 
 const s = StyleSheet.create({
   appbar: { height: 56, flexDirection: 'row', alignItems: 'center', gap: 6, paddingLeft: espacio.m },
