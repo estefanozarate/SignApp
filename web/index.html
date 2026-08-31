@@ -1,0 +1,206 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Sello — demo</title>
+<script src="https://cdn.jsdelivr.net/npm/qrcode@1.5.4/build/qrcode.min.js"></script>
+<style>
+  :root{
+    --tinta:#101821; --hueso:#E7E9E3; --papel:#FBFBF8;
+    --intaglio:#0E5548; --carmin:#96263F; --grafito:#5C6670;
+    --linea:rgba(16,24,33,.13);
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:var(--hueso);color:var(--tinta);
+    font:15px/1.55 'IBM Plex Sans',system-ui,sans-serif;
+    display:grid;place-items:center;min-height:100vh;padding:32px 20px}
+  main{width:min(560px,100%)}
+  h1{font:400 34px/1.1 'Bodoni Moda',Didot,Georgia,serif;letter-spacing:-.4px;margin-bottom:6px}
+  .ceja{font:400 10.5px/1 ui-monospace,monospace;letter-spacing:1.7px;
+    text-transform:uppercase;color:var(--grafito);margin-bottom:14px}
+  p{color:var(--grafito);margin-bottom:20px}
+  .tarjeta{background:var(--papel);border:1px solid var(--linea);border-radius:20px;
+    padding:24px;margin-bottom:16px}
+  button{font:600 15px/1 inherit;height:52px;padding:0 22px;border:0;border-radius:14px;
+    background:var(--intaglio);color:#F4F6F2;cursor:pointer;width:100%;margin-bottom:8px}
+  button.ghost{background:transparent;color:var(--tinta);box-shadow:inset 0 0 0 1px rgba(16,24,33,.24)}
+  button:disabled{opacity:.5;cursor:default}
+  canvas{display:block;margin:0 auto;image-rendering:pixelated;
+    border:10px solid #fff;border-radius:8px}
+  .mono{font:12px/1.7 ui-monospace,monospace;word-break:break-all;color:var(--grafito)}
+  .fila{display:flex;justify-content:space-between;gap:16px;padding:13px 0;
+    border-top:1px solid var(--linea);font-size:13.5px}
+  .fila:first-child{border-top:0}
+  .fila dt{color:var(--grafito);font-size:12.5px}
+  .pill{display:inline-flex;align-items:center;gap:6px;height:26px;padding:0 11px;
+    border-radius:999px;font-size:11.5px;font-weight:600}
+  .ok{background:rgba(14,85,72,.1);color:var(--intaglio)}
+  .mal{background:rgba(150,38,63,.1);color:var(--carmin)}
+  .esp{background:rgba(142,100,18,.12);color:#8E6412}
+  .oculto{display:none}
+</style>
+
+<main>
+  <p class="ceja">Demo del lado navegador</p>
+  <h1>Sello</h1>
+  <p>
+    Esta página tiene su propio par de claves en IndexedDB. Vincula tu teléfono una vez
+    y después podrá aprobar acciones firmando con el chip. Nada secreto viaja por el canal.
+  </p>
+
+  <div class="tarjeta">
+    <dl>
+      <div class="fila"><dt>Huella de este navegador</dt><dd class="mono" id="kid">…</dd></div>
+      <div class="fila"><dt>Teléfono vinculado</dt><dd id="estadoTel"><span class="pill esp">Ninguno</span></dd></div>
+      <div class="fila"><dt>Canal</dt><dd id="estadoCanal"><span class="pill esp">Inactivo</span></dd></div>
+    </dl>
+  </div>
+
+  <div class="tarjeta oculto" id="cajaQr">
+    <canvas id="qr"></canvas>
+    <p class="mono" style="text-align:center;margin:14px 0 0" id="pieQr"></p>
+  </div>
+
+  <div class="tarjeta" id="resultado" hidden></div>
+
+  <button id="btnVincular">Vincular un teléfono</button>
+  <button id="btnAprobar" class="ghost" disabled>Pedir una aprobación</button>
+  <button id="btnOlvidar" class="ghost">Olvidar el teléfono vinculado</button>
+</main>
+
+<script type="module">
+import { identidadNavegador, qrVinculacion, qrAprobacion, verificarFirma } from './sello.js';
+
+// Cambia esto por tu relay. Sin él el flujo llega hasta el QR, pero la
+// respuesta del teléfono no tiene por dónde volver.
+const SIGNALING = 'wss://relay.example/signal';
+const ORIGEN = location.hostname || 'localhost';
+
+const $ = (id) => document.getElementById(id);
+const pill = (clase, texto) => `<span class="pill ${clase}">${texto}</span>`;
+
+const ident = await identidadNavegador();
+$('kid').textContent = ident.kid.replace(/(.{4})/g, '$1 ').trim();
+
+// El teléfono vinculado se guarda igual que en la app: clave pública, no secreto.
+const leerTel = () => JSON.parse(localStorage.getItem('sello.telefono') || 'null');
+const pintarTel = () => {
+  const t = leerTel();
+  $('estadoTel').innerHTML = t ? pill('ok', t.key_id.slice(0, 8) + '··') : pill('esp', 'Ninguno');
+  $('btnAprobar').disabled = !t;
+};
+pintarTel();
+
+function mostrarQr(payload, pie) {
+  $('cajaQr').classList.remove('oculto');
+  $('pieQr').textContent = pie;
+  QRCode.toCanvas($('qr'), payload, { width: 320, margin: 1, errorCorrectionLevel: 'M' });
+}
+
+const estadoCanal = (clase, texto) => { $('estadoCanal').innerHTML = pill(clase, texto); };
+
+function contar(hasta, alExpirar) {
+  const t = setInterval(() => {
+    const q = Math.max(0, hasta - Math.floor(Date.now() / 1000));
+    $('pieQr').textContent = `Caduca en ${Math.floor(q / 60)}:${String(q % 60).padStart(2, '0')}`;
+    if (q <= 0) { clearInterval(t); alExpirar(); }
+  }, 1000);
+  return () => clearInterval(t);
+}
+
+/**
+ * Abre el canal como OFERENTE: crea la PeerConnection y el DataChannel, y
+ * espera la respuesta del teléfono. El relay solo ve el handshake; el
+ * contenido va cifrado extremo a extremo por el DataChannel.
+ */
+function abrirCanal(sessionId, alRecibir) {
+  return new Promise((resolver, rechazar) => {
+    const ws = new WebSocket(`${SIGNALING}?session_id=${encodeURIComponent(sessionId)}`);
+    const pc = new RTCPeerConnection({ iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] });
+    const canal = pc.createDataChannel('sello');
+
+    estadoCanal('esp', 'Conectando');
+    canal.onopen = () => estadoCanal('ok', 'Cifrado P2P');
+    canal.onmessage = (e) => { alRecibir(JSON.parse(e.data)); cerrar(); };
+
+    pc.onicecandidate = (e) => {
+      if (e.candidate) ws.send(JSON.stringify({ type: 'ice', candidate: e.candidate }));
+    };
+    ws.onopen = async () => {
+      await pc.setLocalDescription(await pc.createOffer());
+      ws.send(JSON.stringify({ type: 'offer', sdp: pc.localDescription }));
+    };
+    ws.onmessage = async (e) => {
+      const m = JSON.parse(e.data);
+      if (m.type === 'answer') await pc.setRemoteDescription(m.sdp);
+      else if (m.type === 'ice') await pc.addIceCandidate(m.candidate);
+    };
+    ws.onerror = () => { estadoCanal('mal', 'Sin canal'); rechazar(new Error('signaling')); };
+
+    const cerrar = () => {
+      try { canal.close(); } catch {}
+      try { pc.close(); } catch {}
+      try { ws.close(); } catch {}
+      estadoCanal('esp', 'Inactivo');
+      resolver();
+    };
+    setTimeout(cerrar, 5 * 60000);
+  });
+}
+
+$('btnVincular').onclick = async () => {
+  const { payload, sessionId } = await qrVinculacion({ origen: ORIGEN, signaling: SIGNALING, ttl: 300 });
+  mostrarQr(payload, 'Escanéalo con Sello');
+  const parar = contar(Math.floor(Date.now() / 1000) + 300, () => $('cajaQr').classList.add('oculto'));
+
+  abrirCanal(sessionId, (r) => {
+    parar();
+    $('cajaQr').classList.add('oculto');
+    $('resultado').hidden = false;
+    if (r.type !== 'paired') { $('resultado').innerHTML = pill('mal', 'Rechazado'); return; }
+    // Guardamos la PÚBLICA del teléfono: con ella verificaremos sus firmas.
+    localStorage.setItem('sello.telefono', JSON.stringify(r));
+    pintarTel();
+    $('resultado').innerHTML = `${pill('ok', 'Teléfono vinculado')}
+      <p class="mono" style="margin-top:12px">${r.device} · ${r.key_id}</p>`;
+  }).catch(() => {});
+};
+
+$('btnAprobar').onclick = async () => {
+  const tel = leerTel();
+  const { payload, sessionId, aVerificar } = await qrAprobacion({
+    origen: ORIGEN, signaling: SIGNALING,
+    accion: 'Iniciar sesión', cuenta: 'estefano@' + ORIGEN, ttl: 120,
+  });
+  mostrarQr(payload, 'Escanéalo con Sello');
+  const parar = contar(Math.floor(Date.now() / 1000) + 120, () => $('cajaQr').classList.add('oculto'));
+
+  abrirCanal(sessionId, async (r) => {
+    parar();
+    $('cajaQr').classList.add('oculto');
+    $('resultado').hidden = false;
+
+    if (r.type !== 'signature') {
+      $('resultado').innerHTML = pill('mal', 'Rechazado desde el teléfono');
+      return;
+    }
+    // El navegador no cree en el mensaje: comprueba la firma él mismo.
+    const valida = await verificarFirma({
+      firmaDerB64: r.signature, spkiB64: tel.public_key, aVerificar,
+    });
+    $('resultado').innerHTML = valida
+      ? `${pill('ok', 'Aprobación verificada')}
+         <p class="mono" style="margin-top:12px">firma ${r.signature.slice(0, 24)}…</p>
+         <p style="margin-top:8px;font-size:13px">La firma cubre exactamente el reto que emitimos
+         y solo pudo producirla el chip de ese teléfono.</p>`
+      : `${pill('mal', 'Firma inválida')}
+         <p style="margin-top:8px;font-size:13px">Llegó una respuesta, pero no la firmó el
+         teléfono vinculado. Se descarta.</p>`;
+  }).catch(() => {});
+};
+
+$('btnOlvidar').onclick = () => {
+  localStorage.removeItem('sello.telefono');
+  pintarTel();
+  $('resultado').hidden = true;
+};
+</script>
