@@ -1,6 +1,7 @@
-import React, { useState } from 'react';
+import React, { useCallback, useState } from 'react';
 import { Alert, Modal, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { NativeStackScreenProps } from '@react-navigation/native-stack';
+import { useFocusEffect } from '@react-navigation/native';
 import Pantalla from '../components/Pantalla';
 import { Boton, Ceja, Cuerpo, Fila, H2, Minima, Mono, Tarjeta } from '../components/ui';
 import { Atras } from '../components/Iconos';
@@ -10,7 +11,7 @@ import { eliminarIdentidad } from '../services/identidad';
 import { BiometriaCancelada, ClaveInvalidada, Signing } from '../native/Signing';
 import { retoDePrueba } from '../lib/aleatorio';
 import { olvidarActividad } from '../services/actividad';
-import { cuantosEmisores } from '../services/trustlist';
+import { olvidarVinculos, vinculos } from '../services/vinculos';
 import { Rutas } from '../navigation/tipos';
 
 type Props = NativeStackScreenProps<Rutas, 'Dispositivo'>;
@@ -21,6 +22,9 @@ export default function Dispositivo({ navigation }: Props) {
   const [borrando, setBorrando] = useState(false);
   const [firmando, setFirmando] = useState(false);
   const [prueba, setPrueba] = useState<{ reto: string; firma: string } | null>(null);
+  const [cuantos, setCuantos] = useState(0);
+
+  useFocusEffect(useCallback(() => { vinculos().then(v => setCuantos(v.length)); }, []));
 
   /**
    * Firma de prueba: comprueba de punta a punta que la clave del chip
@@ -58,6 +62,7 @@ export default function Dispositivo({ navigation }: Props) {
     try {
       await eliminarIdentidad();
       await olvidarActividad();
+      await olvidarVinculos();
       setConfirmando(false);
       await refrescar();
     } catch (e: any) {
@@ -92,7 +97,7 @@ export default function Dispositivo({ navigation }: Props) {
             {identidad?.strongBox ? 'StrongBox + biometría' : 'Hardware + biometría'}
           </Fila>
           <Fila etiqueta="Algoritmo">{identidad?.algoritmo ?? '—'}</Fila>
-          <Fila etiqueta="Emisores reconocidos">{`${cuantosEmisores()}`}</Fila>
+          <Fila etiqueta="Navegadores vinculados">{`${cuantos}`}</Fila>
         </Tarjeta>
 
         <Minima style={{ marginBottom: 30 }}>
@@ -124,8 +129,8 @@ export default function Dispositivo({ navigation }: Props) {
           Eliminar esta identidad
         </Boton>
         <Minima style={{ marginTop: 10 }}>
-          Borra la clave del chip seguro junto con el historial de aprobaciones. Es permanente:
-          para volver a aprobar desde aquí, tendrás que crear una identidad nueva.
+          Borra la clave del chip seguro junto con el historial y los navegadores vinculados.
+          Es permanente: para volver a aprobar desde aquí, tendrás que crear una identidad nueva.
         </Minima>
         <View style={{ height: 30 }} />
       </ScrollView>

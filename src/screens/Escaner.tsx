@@ -13,7 +13,7 @@ import { Atras, Check } from '../components/Iconos';
 import { RETICULA } from '../lib/guilloche';
 import { color, espacio, tipo } from '../theme';
 import { Cose } from '../native/Cose';
-import { emisores } from '../services/trustlist';
+import { vinculos } from '../services/vinculos';
 import { Rutas } from '../navigation/tipos';
 
 type Props = NativeStackScreenProps<Rutas, 'Escaner'>;
@@ -24,14 +24,14 @@ type Paso = 'firma' | 'vigencia' | 'sesion';
 type Permiso = 'pidiendo' | 'concedido' | 'denegado' | 'bloqueado';
 
 const PASOS: { id: Paso; texto: string }[] = [
-  { id: 'firma', texto: 'Firma del emisor' },
+  { id: 'firma', texto: 'Firma del navegador' },
   { id: 'vigencia', texto: 'Vigencia del código' },
-  { id: 'sesion', texto: 'Sesión abierta en el sitio' },
+  { id: 'sesion', texto: 'Navegador vinculado' },
 ];
 
 const DONDE_FALLA: Record<string, Paso> = {
   E_FORMATO: 'firma',
-  E_EMISOR_DESCONOCIDO: 'firma',
+  E_NO_VINCULADO: 'firma',
   E_FIRMA: 'firma',
   E_EXPIRADO: 'vigencia',
 };
@@ -74,12 +74,11 @@ export default function Escaner({ navigation }: Props) {
     setPie('Código detectado. Comprobando su firma…');
 
     try {
-      const lista = await emisores();
-      const qr = await Cose.verificarQr(payload, lista);
+      const qr = await Cose.verificarQr(payload, await vinculos());
       // Si la verificación pasó, los tres pasos son ciertos a la vez.
       setHechos(['firma', 'vigencia', 'sesion']);
       setPie(`Abriendo conexión con ${qr.origen}…`);
-      navigation.replace('Aprobacion', { qr });
+      navigation.replace(qr.tipo === 'pair' ? 'Vincular' : 'Aprobacion', { qr });
     } catch (e: any) {
       const codigo: string = e?.code ?? 'E_FORMATO';
       const paso = DONDE_FALLA[codigo] ?? 'firma';
@@ -180,7 +179,7 @@ export default function Escaner({ navigation }: Props) {
 
 function mensajeDe(codigo: string) {
   switch (codigo) {
-    case 'E_EMISOR_DESCONOCIDO': return 'La firma no coincide con ningún emisor autorizado.';
+    case 'E_NO_VINCULADO': return 'Este navegador no está vinculado a tu teléfono.';
     case 'E_FIRMA': return 'La firma del código no es válida.';
     case 'E_EXPIRADO': return 'Este código ya caducó. Pide uno nuevo en el sitio.';
     default: return 'Este código no tiene el formato de Sello.';
