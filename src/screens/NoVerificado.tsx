@@ -11,9 +11,9 @@ import { Rutas } from '../navigation/tipos';
 type Props = NativeStackScreenProps<Rutas, 'NoVerificado'>;
 
 const TEXTOS: Record<string, { titulo: string; cuerpo: string }> = {
-  E_EMISOR_DESCONOCIDO: {
-    titulo: 'Este código no está firmado por un emisor autorizado.',
-    cuerpo: 'Puede haber sido alterado o venir de un sitio que suplanta a otro. No se abrió ninguna conexión y no se firmó nada.',
+  E_NO_VINCULADO: {
+    titulo: 'Este navegador no está vinculado a tu teléfono.',
+    cuerpo: 'Solo los navegadores que vinculaste pueden pedirte aprobaciones. Si es tuyo, vincúlalo primero desde el sitio. No se abrió ninguna conexión y no se firmó nada.',
   },
   E_FIRMA: {
     titulo: 'La firma de este código no cuadra.',
@@ -48,10 +48,10 @@ export default function NoVerificado({ navigation, route }: Props) {
 
         {kidDeclarado ? (
           <Tarjeta>
-            <Fila etiqueta="Emisor declarado" primera>
+            <Fila etiqueta="Navegador" primera>
               <Mono>{kidDeclarado.slice(0, 4)}··{kidDeclarado.slice(-4)}</Mono>
             </Fila>
-            <Fila etiqueta="En tu lista de confianza">
+            <Fila etiqueta="Vinculado">
               <Text style={[tipo.dato, { color: color.carmin }]}>No aparece</Text>
             </Fila>
           </Tarjeta>

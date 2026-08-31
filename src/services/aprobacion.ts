@@ -2,35 +2,35 @@ import { RTCIceCandidate, RTCPeerConnection, RTCSessionDescription } from 'react
 import { Signing } from '../native/Signing';
 
 /**
- * Signaling + WebRTC.
- * El teléfono siempre es el que contesta (answerer): el navegador que mostró
- * el QR crea la oferta y el DataChannel. Aquí no se transmite ningún secreto:
- * entra un reto, sale una firma. El relay solo ve el handshake.
+ * Canal de retorno hacia el navegador.
+ *
+ * El reto ya viene firmado dentro del QR, así que por aquí no entra nada que
+ * haya que creerse: solo sale la respuesta. El teléfono contesta la oferta
+ * SDP del navegador y, cuando el DataChannel abre, manda la firma.
+ *
+ * El relay de signaling solo ve el handshake. El reto y la firma van por el
+ * DataChannel, cifrado extremo a extremo. Y si el navegador está en la misma
+ * red, ni siquiera hace falta relay.
  */
-
-export type Solicitud = {
-  origen: string;        // dominio que pide la aprobación
-  accion: string;        // qué se está aprobando, en texto para el usuario
-  cuenta?: string;
-  navegador?: string;
-  ubicacion?: string;
-  retoB64: string;       // nonce a firmar
-  expiraEn: number;      // epoch en segundos
-};
 
 type Eventos = {
   onEstado?: (e: 'conectando' | 'listo' | 'cerrado') => void;
-  onSolicitud?: (s: Solicitud) => void;
   onError?: (e: Error) => void;
 };
 
 const HIELO = [{ urls: 'stun:stun.l.google.com:19302' }];
 
-export class SesionAprobacion {
+export type Respuesta =
+  | { type: 'signature'; signature: string; key_id: string }
+  | { type: 'paired'; public_key: string; key_id: string; device: string }
+  | { type: 'denied'; reason: string };
+
+export class CanalNavegador {
   private ws?: WebSocket;
   private pc?: RTCPeerConnection;
   private canal?: any;
   private cerrada = false;
+  private pendiente?: Respuesta;
 
   constructor(
     private signalingUrl: string,
@@ -42,7 +42,7 @@ export class SesionAprobacion {
     this.ev.onEstado?.('conectando');
     const url = `${this.signalingUrl}?session_id=${encodeURIComponent(this.sessionId)}`;
     // Sin backend no hay token: el session_id del QR es la única credencial,
-    // por eso tiene que ser largo, aleatorio y de vida corta.
+    // por eso lo genera un CSPRNG y caduca en minutos.
     this.ws = new WebSocket(url);
 
     this.ws.onerror = () => this.fallar(new Error('No se pudo abrir el canal con el sitio.'));
@@ -81,41 +81,45 @@ export class SesionAprobacion {
 
   private enCanal(canal: any) {
     this.canal = canal;
-    canal.addEventListener('open', () => this.ev.onEstado?.('listo'));
-    canal.addEventListener('close', () => { if (!this.cerrada) this.ev.onEstado?.('cerrado'); });
-    canal.addEventListener('message', (e: any) => {
-      const m = JSON.parse(String(e.data));
-      if (m.type === 'challenge') {
-        this.ev.onSolicitud?.({
-          origen: m.origin, accion: m.action, cuenta: m.account,
-          navegador: m.browser, ubicacion: m.location,
-          retoB64: m.challenge, expiraEn: m.exp,
-        });
-      }
+    canal.addEventListener('open', () => {
+      this.ev.onEstado?.('listo');
+      // Si el usuario aprobó antes de que el canal abriera, sale ahora.
+      if (this.pendiente) { this.despachar(this.pendiente); this.pendiente = undefined; }
     });
+    canal.addEventListener('close', () => { if (!this.cerrada) this.ev.onEstado?.('cerrado'); });
+  }
+
+  private despachar(r: Respuesta) {
+    this.canal?.send(JSON.stringify(r));
+    this.cerrar();
+  }
+
+  /** Encola si el canal aún no abrió: el usuario no debería esperar a la red. */
+  private responder(r: Respuesta) {
+    if (this.canal?.readyState === 'open') this.despachar(r);
+    else this.pendiente = r;
   }
 
   /**
-   * Pide biometría, firma dentro del Keystore y manda SOLO la firma.
-   * El título del prompt lleva el contexto para que el usuario vea qué aprueba.
+   * Pide autenticación, firma dentro del Keystore y manda SOLO la firma.
+   * El reto viene del QR ya verificado: lo que el usuario vio es lo que firma.
    */
-  async aprobar(s: Solicitud) {
-    const { firmaDerB64, keyId } = await Signing.firmar(
-      s.retoB64,
-      s.accion,
-      s.origen,
-    );
-    this.canal?.send(JSON.stringify({ type: 'signature', signature: firmaDerB64, key_id: keyId }));
-    this.cerrar();
+  async aprobar(retoB64: string, accion: string, origen: string) {
+    const { firmaDerB64, keyId } = await Signing.firmar(retoB64, accion, origen);
+    this.responder({ type: 'signature', signature: firmaDerB64, key_id: keyId });
     return { firmaDerB64, keyId };
   }
 
-  rechazar(motivo = 'user_denied') {
-    this.canal?.send(JSON.stringify({ type: 'denied', reason: motivo }));
-    this.cerrar();
+  /** En la vinculación lo que viaja es la clave PÚBLICA: no es un secreto. */
+  async vincular(clavePublicaSpkiB64: string, keyId: string, dispositivo: string) {
+    this.responder({ type: 'paired', public_key: clavePublicaSpkiB64, key_id: keyId, device: dispositivo });
   }
 
-  /** Nada queda abierto después de aprobar o rechazar. */
+  rechazar(motivo = 'user_denied') {
+    this.responder({ type: 'denied', reason: motivo });
+  }
+
+  /** Nada queda abierto después de responder. */
   cerrar() {
     this.cerrada = true;
     try { this.canal?.close(); } catch {}
