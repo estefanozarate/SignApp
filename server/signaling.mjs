@@ -21,6 +21,9 @@ const PUERTO = Number(process.env.PORT ?? 8787);
 const HOST = process.env.HOST ?? '127.0.0.1';
 const VIDA_SALA_MS = 5 * 60000;
 const MAX_MENSAJE = 64 * 1024;
+// Tope del buzón: una oferta SDP y sus candidatos ICE. Suficiente para el
+// handshake y poco para que sirva de almacenamiento a nadie.
+const MAX_BUZON = 64;
 
 const salas = new Map();
 
@@ -39,7 +42,7 @@ wss.on('connection', (ws, req) => {
 
   let sala = salas.get(sid);
   if (!sala) {
-    sala = { pares: [], temporizador: null };
+    sala = { pares: [], buzon: [], temporizador: null };
     sala.temporizador = setTimeout(() => cerrarSala(sid, 'caducada'), VIDA_SALA_MS);
     salas.set(sid, sala);
   }
@@ -55,6 +58,16 @@ wss.on('connection', (ws, req) => {
   sala.pares.push(ws);
   log(sid, `${quien} conectado (${sala.pares.length}/2)`);
 
+  // El navegador manda la oferta y sus candidatos ICE en cuanto pinta el QR,
+  // mucho antes de que el usuario alcance a escanearlo. Sin buzón esos
+  // mensajes se reenviaban a nadie y el teléfono esperaba una oferta que ya
+  // había pasado. Al entrar el segundo, se le entrega lo acumulado.
+  if (sala.buzon.length) {
+    log(sid, `${quien} recibe ${sala.buzon.length} mensajes en espera`);
+    for (const guardado of sala.buzon) ws.send(guardado);
+    sala.buzon = [];
+  }
+
   ws.on('message', (datos, esBinario) => {
     if (esBinario || datos.length > MAX_MENSAJE) {
       ws.close(1009, 'mensaje no admitido');
@@ -67,7 +80,19 @@ wss.on('connection', (ws, req) => {
     try { tipo = JSON.parse(texto).type ?? '?'; } catch {}
 
     const destinos = sala.pares.filter(o => o !== ws && o.readyState === o.OPEN);
-    log(sid, `${ws.etiqueta} → ${destinos.map(d => d.etiqueta).join(',') || '(nadie)'}  ${tipo}  ${texto.length}B`);
+
+    if (destinos.length === 0) {
+      // Nadie al otro lado todavía: se guarda para cuando llegue.
+      if (sala.buzon.length < MAX_BUZON) {
+        sala.buzon.push(texto);
+        log(sid, `${ws.etiqueta} → (en espera)  ${tipo}  ${texto.length}B`);
+      } else {
+        log(sid, `${ws.etiqueta} → (descartado, buzón lleno)  ${tipo}`);
+      }
+      return;
+    }
+
+    log(sid, `${ws.etiqueta} → ${destinos.map(d => d.etiqueta).join(',')}  ${tipo}  ${texto.length}B`);
     for (const otro of destinos) otro.send(texto);
   });
 
