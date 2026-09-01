@@ -30,7 +30,7 @@ export class CanalNavegador {
   private pc?: RTCPeerConnection;
   private canal?: any;
   private cerrada = false;
-  private pendiente?: Respuesta;
+  private pendiente?: { r: Respuesta; ok: () => void; falla: (e: Error) => void };
 
   constructor(
     private signalingUrl: string,
@@ -84,20 +84,45 @@ export class CanalNavegador {
     canal.addEventListener('open', () => {
       this.ev.onEstado?.('listo');
       // Si el usuario aprobó antes de que el canal abriera, sale ahora.
-      if (this.pendiente) { this.despachar(this.pendiente); this.pendiente = undefined; }
+      const p = this.pendiente;
+      if (p) {
+        this.pendiente = undefined;
+        this.despachar(p.r).then(p.ok, p.falla);
+      }
     });
     canal.addEventListener('close', () => { if (!this.cerrada) this.ev.onEstado?.('cerrado'); });
   }
 
-  private despachar(r: Respuesta) {
-    this.canal?.send(JSON.stringify(r));
-    this.cerrar();
+  /**
+   * Envía y espera a que salga de verdad. `send` solo encola en el buffer del
+   * DataChannel: cerrar inmediatamente después descarta el mensaje.
+   */
+  private async despachar(r: Respuesta) {
+    this.canal.send(JSON.stringify(r));
+    const limite = Date.now() + 3000;
+    while (this.canal.bufferedAmount > 0 && Date.now() < limite) {
+      await new Promise<void>(res => setTimeout(res, 50));
+    }
   }
 
-  /** Encola si el canal aún no abrió: el usuario no debería esperar a la red. */
-  private responder(r: Respuesta) {
-    if (this.canal?.readyState === 'open') this.despachar(r);
-    else this.pendiente = r;
+  /**
+   * Encola si el canal aún no abrió: el usuario no debería esperar a la red
+   * para poner su PIN. La promesa resuelve cuando el mensaje ya salió, y
+   * quien llama no debe cerrar la pantalla antes de eso.
+   */
+  private responder(r: Respuesta): Promise<void> {
+    if (this.cerrada) return Promise.reject(new Error('El canal ya estaba cerrado.'));
+    if (this.canal?.readyState === 'open') return this.despachar(r);
+
+    return new Promise((ok, falla) => {
+      this.pendiente = { r, ok, falla };
+      // Si el canal no abre, no dejamos al usuario esperando para siempre.
+      setTimeout(() => {
+        if (this.pendiente?.r !== r) return;
+        this.pendiente = undefined;
+        falla(new Error('El sitio no respondió a tiempo.'));
+      }, 20000);
+    });
   }
 
   /**
@@ -106,22 +131,26 @@ export class CanalNavegador {
    */
   async aprobar(retoB64: string, accion: string, origen: string) {
     const { firmaDerB64, keyId } = await Signing.firmar(retoB64, accion, origen);
-    this.responder({ type: 'signature', signature: firmaDerB64, key_id: keyId });
+    await this.responder({ type: 'signature', signature: firmaDerB64, key_id: keyId });
     return { firmaDerB64, keyId };
   }
 
   /** En la vinculación lo que viaja es la clave PÚBLICA: no es un secreto. */
   async vincular(clavePublicaSpkiB64: string, keyId: string, dispositivo: string) {
-    this.responder({ type: 'paired', public_key: clavePublicaSpkiB64, key_id: keyId, device: dispositivo });
+    await this.responder({ type: 'paired', public_key: clavePublicaSpkiB64, key_id: keyId, device: dispositivo });
   }
 
   rechazar(motivo = 'user_denied') {
-    this.responder({ type: 'denied', reason: motivo });
+    // Sin await: rechazar no debe bloquear al usuario si el canal no abrió.
+    this.responder({ type: 'denied', reason: motivo }).catch(() => {});
   }
 
   /** Nada queda abierto después de responder. */
   cerrar() {
+    if (this.cerrada) return;
     this.cerrada = true;
+    this.pendiente?.falla(new Error('El canal se cerró antes de responder.'));
+    this.pendiente = undefined;
     try { this.canal?.close(); } catch {}
     try { this.pc?.close(); } catch {}
     try { this.ws?.close(); } catch {}
