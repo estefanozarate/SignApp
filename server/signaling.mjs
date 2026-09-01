@@ -50,23 +50,30 @@ wss.on('connection', (ws, req) => {
     return;
   }
 
+  const quien = sala.pares.length === 0 ? 'A' : 'B';
+  ws.etiqueta = quien;
   sala.pares.push(ws);
-  log(sid, `conectado (${sala.pares.length}/2)`);
+  log(sid, `${quien} conectado (${sala.pares.length}/2)`);
 
   ws.on('message', (datos, esBinario) => {
     if (esBinario || datos.length > MAX_MENSAJE) {
       ws.close(1009, 'mensaje no admitido');
       return;
     }
-    // Se reenvía tal cual, sin mirar dentro.
-    for (const otro of sala.pares) {
-      if (otro !== ws && otro.readyState === otro.OPEN) otro.send(datos.toString());
-    }
+    // Se reenvía tal cual. Solo se mira el campo `type` para el registro:
+    // es diagnóstico, no lógica — el relay no decide nada con eso.
+    const texto = datos.toString();
+    let tipo = '?';
+    try { tipo = JSON.parse(texto).type ?? '?'; } catch {}
+
+    const destinos = sala.pares.filter(o => o !== ws && o.readyState === o.OPEN);
+    log(sid, `${ws.etiqueta} → ${destinos.map(d => d.etiqueta).join(',') || '(nadie)'}  ${tipo}  ${texto.length}B`);
+    for (const otro of destinos) otro.send(texto);
   });
 
   ws.on('close', () => {
     sala.pares = sala.pares.filter(p => p !== ws);
-    log(sid, `desconectado (${sala.pares.length}/2)`);
+    log(sid, `${ws.etiqueta} desconectado (${sala.pares.length}/2)`);
     if (sala.pares.length === 0) cerrarSala(sid, 'vacía');
   });
 
