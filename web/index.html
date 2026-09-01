@@ -2,7 +2,6 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Sello — demo</title>
-<script src="https://cdn.jsdelivr.net/npm/qrcode@1.5.4/build/qrcode.min.js"></script>
 <style>
   :root{
     --tinta:#101821; --hueso:#E7E9E3; --papel:#FBFBF8;
@@ -24,8 +23,7 @@
     background:var(--intaglio);color:#F4F6F2;cursor:pointer;width:100%;margin-bottom:8px}
   button.ghost{background:transparent;color:var(--tinta);box-shadow:inset 0 0 0 1px rgba(16,24,33,.24)}
   button:disabled{opacity:.5;cursor:default}
-  canvas{display:block;margin:0 auto;image-rendering:pixelated;
-    border:10px solid #fff;border-radius:8px}
+  canvas{display:block;margin:0 auto;image-rendering:pixelated;border-radius:6px}
   .mono{font:12px/1.7 ui-monospace,monospace;word-break:break-all;color:var(--grafito)}
   .fila{display:flex;justify-content:space-between;gap:16px;padding:13px 0;
     border-top:1px solid var(--linea);font-size:13.5px}
@@ -69,10 +67,14 @@
 
 <script type="module">
 import { identidadNavegador, qrVinculacion, qrAprobacion, verificarFirma } from './sello.js';
+import qrcode from './vendor-qrcode.js';
 
-// Cambia esto por tu relay. Sin él el flujo llega hasta el QR, pero la
-// respuesta del teléfono no tiene por dónde volver.
-const SIGNALING = 'wss://relay.example/signal';
+// Loopback a propósito: el navegador llega por localhost y el teléfono
+// también, gracias a `adb reverse tcp:8787 tcp:8787`. Así no hace falta
+// exponer el relay en la red ni relajar la regla de la app, que solo acepta
+// wss:// o ws:// en 127.0.0.1 — donde no hay red que espiar.
+// En producción esto sería un wss:// de verdad.
+const SIGNALING = 'ws://127.0.0.1:8787';
 const ORIGEN = location.hostname || 'localhost';
 
 const $ = (id) => document.getElementById(id);
@@ -93,7 +95,30 @@ pintarTel();
 function mostrarQr(payload, pie) {
   $('cajaQr').classList.remove('oculto');
   $('pieQr').textContent = pie;
-  QRCode.toCanvas($('qr'), payload, { width: 320, margin: 1, errorCorrectionLevel: 'M' });
+
+  const qr = qrcode(0, 'M');   // 0 = la versión más pequeña que quepa
+  qr.addData(payload, 'Byte');
+  qr.make();
+
+  const n = qr.getModuleCount();
+  const margen = 4;            // zona de silencio que exige la norma
+  const escala = Math.max(2, Math.floor(340 / (n + margen * 2)));
+  const lado = (n + margen * 2) * escala;
+
+  const c = $('qr');
+  c.width = c.height = lado;
+  c.style.width = c.style.height = lado + 'px';
+  const ctx = c.getContext('2d');
+  ctx.fillStyle = '#fff';
+  ctx.fillRect(0, 0, lado, lado);
+  ctx.fillStyle = '#101821';
+  for (let y = 0; y < n; y++) {
+    for (let x = 0; x < n; x++) {
+      if (qr.isDark(y, x)) {
+        ctx.fillRect((x + margen) * escala, (y + margen) * escala, escala, escala);
+      }
+    }
+  }
 }
 
 const estadoCanal = (clase, texto) => { $('estadoCanal').innerHTML = pill(clase, texto); };
