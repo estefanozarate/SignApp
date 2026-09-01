@@ -15,12 +15,16 @@
 import { WebSocketServer } from 'ws';
 
 const PUERTO = Number(process.env.PORT ?? 8787);
+// Explícitamente IPv4: por defecto Node escucha en :: (IPv6), y el reenvío
+// de `adb reverse` llega por IPv4. Sin esto el navegador conecta y el
+// teléfono no, que es un fallo difícil de ver.
+const HOST = process.env.HOST ?? '127.0.0.1';
 const VIDA_SALA_MS = 5 * 60000;
 const MAX_MENSAJE = 64 * 1024;
 
 const salas = new Map();
 
-const wss = new WebSocketServer({ port: PUERTO });
+const wss = new WebSocketServer({ host: HOST, port: PUERTO });
 
 wss.on('connection', (ws, req) => {
   const url = new URL(req.url, 'http://x');
@@ -80,5 +84,5 @@ function cerrarSala(sid, motivo) {
 
 const log = (sid, msg) => console.log(`[${sid.slice(0, 8)}…] ${msg}`);
 
-console.log(`Relay de signaling escuchando en ws://127.0.0.1:${PUERTO}`);
+console.log(`Relay de signaling escuchando en ws://${HOST}:${PUERTO}`);
 console.log('Para que el teléfono llegue hasta aquí:  adb reverse tcp:8787 tcp:8787');
