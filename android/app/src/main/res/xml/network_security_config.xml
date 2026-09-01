@@ -1,5 +1,16 @@
-<?xml version="1.0" encoding="utf-8"?>
-<!-- Sin texto claro en ningún caso: todo el signaling y la API van por TLS. -->
-<network-security-config>
-    <base-config cleartextTrafficPermitted="false" />
-</network-security-config>
+&lt;?xml version="1.0" encoding="utf-8"?&gt;
+&lt;!--
+  Sin texto claro en ningún caso: todo el signaling y la API van por TLS.
+
+  La única excepción es 127.0.0.1, y es deliberada: ahí no hay red que
+  espiar. Sirve para el relay local durante el desarrollo, al que el
+  teléfono llega por `adb reverse`. Es la misma regla que aplica
+  CoseModule al claim "sgu" del QR, que solo acepta wss:// o
+  ws://127.0.0.1 — conviene que las dos capas digan lo mismo.
+--&gt;
+&lt;network-security-config&gt;
+    &lt;base-config cleartextTrafficPermitted="false" /&gt;
+    &lt;domain-config cleartextTrafficPermitted="true"&gt;
+        &lt;domain includeSubdomains="false"&gt;127.0.0.1&lt;/domain&gt;
+    &lt;/domain-config&gt;
+&lt;/network-security-config&gt;
