@@ -12,7 +12,7 @@ import { Rutas } from '../navigation/tipos';
 type Props = NativeStackScreenProps<Rutas, 'Firmado'>;
 
 export default function Firmado({ navigation, route }: Props) {
-  const { firmaDerB64, keyId, origen } = route.params;
+  const { firmaDerB64, origen } = route.params;
   const aparece = useRef(new Animated.Value(0)).current;
 
   useEffect(() => {
@@ -34,10 +34,10 @@ export default function Firmado({ navigation, route }: Props) {
         <Animated.View style={[s.texto, { opacity: aparece }]}>
           <H2 style={{ marginBottom: 8 }}>Aprobado</H2>
           <Cuerpo style={{ textAlign: 'center', maxWidth: 270, marginBottom: 18 }}>
-            Ya puedes volver a la pantalla de {origen}. La sesión se abrió allí.
+            Ya puedes volver a la pantalla de {origen}. Tu aprobación llegó allí.
           </Cuerpo>
           <Text style={[tipo.mono, { color: color.grafito }]}>
-            firma {corto(firmaDerB64)} · clave {corto(keyId)}
+            comprobante {corto(firmaDerB64)}
           </Text>
         </Animated.View>
       </View>

@@ -44,11 +44,11 @@ export default function Bienvenida(_: Props) {
       <View style={s.pie}>
         <Ceja style={{ color: color.huesoTenue, marginBottom: 16 }}>Identidad del dispositivo</Ceja>
         <Display style={{ color: color.hueso, marginBottom: 14 }}>
-          Tu firma vive{'\n'}en este teléfono.
+          Aprueba desde{'\n'}este teléfono.
         </Display>
         <Cuerpo style={{ color: color.huesoTenue, maxWidth: 300, marginBottom: 26 }}>
-          Se crea dentro del chip seguro y no puede salir de él. Para usarla te pedirá tu
-          huella o el PIN del dispositivo. No hay cuenta ni contraseña: este teléfono es la identidad.
+          Se crea una identidad dentro del chip seguro, que no puede salir de él. Para usarla
+          te pedirá tu huella o el PIN. No hay cuenta ni contraseña: este teléfono es la identidad.
         </Cuerpo>
 
         <Boton variante="claro" cargando={ocupado} onPress={crear}>
@@ -57,8 +57,8 @@ export default function Bienvenida(_: Props) {
 
         {/* Sin copia de seguridad posible: hay que decirlo antes, no después. */}
         <Minima style={{ color: color.huesoTenue, marginTop: 14, textAlign: 'center' }}>
-          La clave no se puede copiar ni respaldar. Si pierdes el teléfono, tendrás que crear
-          una identidad nueva.
+          La identidad no se puede copiar ni respaldar. Si pierdes el teléfono, tendrás que
+          crear una nueva.
         </Minima>
       </View>
     </Pantalla>
