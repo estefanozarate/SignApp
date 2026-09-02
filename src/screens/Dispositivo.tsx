@@ -27,8 +27,8 @@ export default function Dispositivo({ navigation }: Props) {
   useFocusEffect(useCallback(() => { vinculos().then(v => setCuantos(v.length)); }, []));
 
   /**
-   * Firma de prueba: comprueba de punta a punta que la clave del chip
-   * responde — prompt del sistema, firma dentro del hardware, y el caso de
+   * Aprobación de prueba: recorre de punta a punta la cadena del chip —
+   * prompt del sistema, operación dentro del hardware, y el caso de
    * cancelación. No sale nada del teléfono; el reto se genera aquí mismo.
    */
   const firmarPrueba = async () => {
@@ -38,7 +38,7 @@ export default function Dispositivo({ navigation }: Props) {
       const reto = retoDePrueba();
       const { firmaDerB64 } = await Signing.firmar(
         reto,
-        'Firma de prueba',
+        'Aprobación de prueba',
         'Solo para comprobar que el chip responde',
       );
       setPrueba({ reto, firma: firmaDerB64 });
@@ -47,11 +47,11 @@ export default function Dispositivo({ navigation }: Props) {
       if (e instanceof ClaveInvalidada) {
         Alert.alert(
           'Hay que crear la identidad de nuevo',
-          'La biometría del dispositivo cambió, así que la clave anterior quedó invalidada.',
+          'La biometría del dispositivo cambió, así que la identidad anterior dejó de ser válida.',
         );
         return;
       }
-      Alert.alert('No se pudo firmar', e?.message ?? 'Error desconocido.');
+      Alert.alert('No se pudo completar', e?.message ?? 'Error desconocido.');
     } finally {
       setFirmando(false);
     }
@@ -83,7 +83,7 @@ export default function Dispositivo({ navigation }: Props) {
 
       <ScrollView contentContainerStyle={s.cuerpo} showsVerticalScrollIndicator={false}>
         <Tarjeta style={{ marginBottom: 14 }}>
-          <Fila etiqueta="Clave de firma" primera>
+          <Fila etiqueta="Identidad" primera>
             <Mono>{identidad ? `${identidad.keyId.slice(0, 8)}··${identidad.keyId.slice(-4)}` : '—'}</Mono>
           </Fila>
           <Fila etiqueta="Creada">
@@ -101,27 +101,27 @@ export default function Dispositivo({ navigation }: Props) {
         </Tarjeta>
 
         <Minima style={{ marginBottom: 30 }}>
-          La clave se generó en este teléfono y nunca sale de él. No hay servidor donde esté
-          registrada, ni copia que se pueda restaurar.
+          La identidad se generó en este teléfono y nunca sale de él. No hay servidor donde
+          esté registrada, ni copia que se pueda restaurar.
         </Minima>
 
-        <Ceja style={{ marginBottom: 10 }}>Comprobar la clave</Ceja>
+        <Ceja style={{ marginBottom: 10 }}>Comprobar la identidad</Ceja>
         <Boton variante="fantasma" cargando={firmando} deshabilitado={!identidad} onPress={firmarPrueba}>
-          Firmar un reto de prueba
+          Hacer una aprobación de prueba
         </Boton>
         {prueba ? (
           <Tarjeta style={{ marginTop: 12 }}>
-            <Fila etiqueta="Reto" primera>
+            <Fila etiqueta="Petición" primera>
               <Mono>{corto(prueba.reto)}</Mono>
             </Fila>
-            <Fila etiqueta="Firma">
+            <Fila etiqueta="Comprobante">
               <Mono>{corto(prueba.firma)}</Mono>
             </Fila>
           </Tarjeta>
         ) : null}
         <Minima style={{ marginTop: 10, marginBottom: 30 }}>
-          Genera un reto en el teléfono y lo firma dentro del chip. Nada sale del dispositivo:
-          sirve para confirmar que la clave sigue viva y que pide tu huella o tu PIN.
+          Genera una petición local y la aprueba dentro del chip. Nada sale del dispositivo:
+          sirve para confirmar que la identidad sigue viva y que pide tu huella o tu PIN.
         </Minima>
 
         <Ceja style={{ marginBottom: 10 }}>Retirar el dispositivo</Ceja>
@@ -129,8 +129,8 @@ export default function Dispositivo({ navigation }: Props) {
           Eliminar esta identidad
         </Boton>
         <Minima style={{ marginTop: 10 }}>
-          Borra la clave del chip seguro junto con el historial y los navegadores vinculados.
-          Es permanente: para volver a aprobar desde aquí, tendrás que crear una identidad nueva.
+          Borra la identidad del chip seguro junto con el historial y los navegadores vinculados. Es permanente:
+          para volver a aprobar desde aquí, tendrás que crear una identidad nueva.
         </Minima>
         <View style={{ height: 30 }} />
       </ScrollView>
@@ -140,8 +140,8 @@ export default function Dispositivo({ navigation }: Props) {
         <View style={s.dialogo}>
           <H2 style={{ fontSize: 22, marginBottom: 10 }}>¿Eliminar esta identidad?</H2>
           <Cuerpo style={{ marginBottom: 20 }}>
-            La clave se borra del chip seguro y no se puede recuperar. Las sesiones que aprobaste
-            seguirán siendo válidas hasta que caduquen.
+            La identidad se borra del chip seguro y no se puede recuperar. Lo que ya aprobaste
+            seguirá siendo válido hasta que caduque.
           </Cuerpo>
           <Boton variante="peligro" cargando={borrando} onPress={eliminar}>Sí, eliminar</Boton>
           <Boton variante="fantasma" style={{ marginTop: 8 }} onPress={() => setConfirmando(false)}>
