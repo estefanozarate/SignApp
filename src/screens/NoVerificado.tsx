@@ -30,7 +30,7 @@ const TEXTOS: Record<string, { titulo: string; cuerpo: string }> = {
 };
 
 export default function NoVerificado({ navigation, route }: Props) {
-  const { motivo, kidDeclarado } = route.params;
+  const { motivo, kidDeclarado, detalle } = route.params;
   const t = TEXTOS[motivo] ?? TEXTOS.E_FORMATO;
 
   return (
@@ -45,6 +45,14 @@ export default function NoVerificado({ navigation, route }: Props) {
         <Alerta />
         <H2 style={{ marginTop: 20 }}>{t.titulo}</H2>
         <Cuerpo style={{ marginTop: 12, marginBottom: 20 }}>{t.cuerpo}</Cuerpo>
+
+        {/* El detalle que dio el módulo, cuando aporta algo que el texto
+            general no dice. Sin esto, causas muy distintas se ven iguales. */}
+        {detalle && !t.cuerpo.includes(detalle) ? (
+          <View style={s.detalle}>
+            <Text style={[tipo.mono, { color: color.grafito, lineHeight: 18 }]}>{detalle}</Text>
+          </View>
+        ) : null}
 
         {kidDeclarado ? (
           <Tarjeta>
@@ -67,6 +75,10 @@ export default function NoVerificado({ navigation, route }: Props) {
 }
 
 const s = StyleSheet.create({
+  detalle: {
+    backgroundColor: 'rgba(16,24,33,0.045)', borderRadius: 10,
+    padding: 12, marginBottom: 20,
+  },
   appbar: { height: 56, alignItems: 'flex-end', paddingRight: espacio.m, justifyContent: 'center' },
   iconbtn: { width: 40, height: 40, borderRadius: 20, alignItems: 'center', justifyContent: 'center' },
   cuerpo: { flex: 1, justifyContent: 'center', paddingHorizontal: espacio.l, paddingBottom: 40 },

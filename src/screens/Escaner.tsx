@@ -86,7 +86,13 @@ export default function Escaner({ navigation }: Props) {
       setHechos(paso === 'vigencia' ? ['firma'] : []);
       setPie(mensajeDe(codigo));
       setTimeout(
-        () => navigation.replace('NoVerificado', { motivo: codigo, kidDeclarado: e?.userInfo?.kid }),
+        () => navigation.replace('NoVerificado', {
+          motivo: codigo,
+          kidDeclarado: e?.userInfo?.kid,
+          // El módulo nativo distingue causas que el código de error agrupa.
+          // Tirar ese mensaje deja al usuario —y a quien depura— a ciegas.
+          detalle: e?.message,
+        }),
         900,
       );
     }
