@@ -13,11 +13,11 @@ type Props = NativeStackScreenProps<Rutas, 'NoVerificado'>;
 const TEXTOS: Record<string, { titulo: string; cuerpo: string }> = {
   E_NO_VINCULADO: {
     titulo: 'Este navegador no está vinculado a tu teléfono.',
-    cuerpo: 'Solo los navegadores que vinculaste pueden pedirte aprobaciones. Si es tuyo, vincúlalo primero desde el sitio. No se abrió ninguna conexión y no se firmó nada.',
+    cuerpo: 'Solo los navegadores que vinculaste pueden pedirte aprobaciones. Si es tuyo, vincúlalo primero desde el sitio. No se abrió ninguna conexión y no se aprobó nada.',
   },
   E_FIRMA: {
-    titulo: 'La firma de este código no cuadra.',
-    cuerpo: 'El contenido cambió después de firmarse. No se abrió ninguna conexión y no se firmó nada.',
+    titulo: 'Este código fue alterado.',
+    cuerpo: 'Su contenido no coincide con lo que el sitio emitió. No se abrió ninguna conexión y no se aprobó nada.',
   },
   E_EXPIRADO: {
     titulo: 'Este código ya caducó.',

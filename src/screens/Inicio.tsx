@@ -46,10 +46,10 @@ export default function Inicio({ navigation }: Props) {
 
         <View style={s.estado}>
           <Pildora estado={identidad ? 'ok' : 'esp'}>
-            {identidad ? 'Clave activa' : 'Sin identidad'}
+            {identidad ? 'Listo para aprobar' : 'Sin identidad'}
           </Pildora>
           <Minima style={{ textAlign: 'center', maxWidth: 250, marginTop: 9 }}>
-            Protegida por el hardware del teléfono. Pide tu huella o tu PIN en cada firma.
+            Protegida por el hardware del teléfono. Te pide tu huella o tu PIN cada vez.
           </Minima>
         </View>
 
