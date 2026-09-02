@@ -1,8 +1,9 @@
 {
-  "name": "sello-signaling",
+  "name": "sello-servidor",
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "scripts": { "start": "node signaling.mjs" },
-  "dependencies": { "ws": "^8.18.0" }
+  "scripts": {
+    "start": "node servidor.mjs"
+  }
 }
