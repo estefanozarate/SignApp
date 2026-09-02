@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { Alert, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { Alert, LayoutAnimation, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { NativeStackScreenProps } from '@react-navigation/native-stack';
 import Pantalla from '../components/Pantalla';
 import { Boton, Ceja, Cuerpo, Fila, Minima, Origen, Pildora, Tarjeta } from '../components/ui';
@@ -20,6 +20,7 @@ export default function Aprobacion({ navigation, route }: Props) {
   const [estado, setEstado] = useState<'conectando' | 'listo' | 'cerrado'>('conectando');
   const [firmando, setFirmando] = useState(false);
   const [restante, setRestante] = useState(qr.expiraEn - Math.floor(Date.now() / 1000));
+  const [detalles, setDetalles] = useState(false);
 
   useEffect(() => {
     if (!qr.signalingUrl) return;
@@ -67,12 +68,12 @@ export default function Aprobacion({ navigation, route }: Props) {
       if (e instanceof ClaveInvalidada) {
         Alert.alert(
           'Hay que crear la identidad de nuevo',
-          'La biometría del dispositivo cambió, así que la clave anterior quedó invalidada.',
+          'La biometría del dispositivo cambió, así que la identidad anterior dejó de ser válida.',
         );
         navigation.navigate('Dispositivo');
         return;
       }
-      Alert.alert('No se pudo firmar', e?.message ?? 'Error desconocido.');
+      Alert.alert('No se pudo aprobar', e?.message ?? 'Error desconocido.');
     } finally {
       setFirmando(false);
     }
@@ -116,21 +117,47 @@ export default function Aprobacion({ navigation, route }: Props) {
           </Fila>
         </Tarjeta>
 
-        <Ceja style={{ marginBottom: 7 }}>Reto que vas a firmar</Ceja>
-        <View style={s.reto}>
-          <Text style={[tipo.mono, { color: color.grafito, lineHeight: 20 }]}>
-            {retoLegible(qr.retoB64)}
-          </Text>
-        </View>
-        <Minima style={{ marginTop: 14, marginBottom: 26 }}>
-          La firma cubre exactamente lo que ves arriba, así que no sirve para autorizar
-          ninguna otra cosa. Se firma dentro del chip: tu clave privada no se transmite.
+        <Minima style={{ marginBottom: 14 }}>
+          Tu aprobación queda ligada a esta petición y a ninguna otra. Se genera dentro del
+          chip seguro y no sale nada de tu teléfono salvo la respuesta.
         </Minima>
+
+        {/* El código de verificación no se muestra de entrada: la mayoría no lo
+            necesita. Pero no se elimina, porque es lo único que permite
+            comparar a mano con lo que muestra el sitio ante una sospecha. */}
+        <Pressable
+          onPress={() => {
+            LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+            setDetalles(v => !v);
+          }}
+          style={s.detalles}>
+          <Minima style={{ color: color.intaglio, textDecorationLine: 'underline' }}>
+            {detalles ? 'Ocultar código de verificación' : 'Ver código de verificación'}
+          </Minima>
+        </Pressable>
+
+        {detalles ? (
+          <>
+            <View style={s.reto}>
+              <Text style={[tipo.mono, { color: color.grafito, lineHeight: 20 }]}>
+                {retoLegible(qr.retoB64)}
+              </Text>
+            </View>
+            <Minima style={{ marginTop: 10 }}>
+              Debe coincidir con el que muestra {qr.origen}. Si no coincide, rechaza.
+            </Minima>
+          </>
+        ) : null}
+        <View style={{ height: 26 }} />
       </ScrollView>
 
       <View style={s.acciones}>
-        <Boton onPress={aprobar} cargando={firmando} icono={<Check />}>
-          Aprobar y firmar
+        <Boton
+          onPress={aprobar}
+          cargando={firmando}
+          deshabilitado={estado !== 'listo'}
+          icono={<Check />}>
+          {estado === 'listo' ? 'Aprobar' : 'Esperando al sitio…'}
         </Boton>
         <Boton variante="peligro" onPress={rechazar}>Rechazar</Boton>
       </View>
@@ -145,6 +172,7 @@ const s = StyleSheet.create({
   },
   iconbtn: { width: 40, height: 40, borderRadius: 20, alignItems: 'center', justifyContent: 'center' },
   cuerpo: { paddingHorizontal: espacio.l },
+  detalles: { paddingVertical: 8, marginBottom: 6 },
   reto: { backgroundColor: 'rgba(16,24,33,0.045)', borderRadius: radio.s, padding: 12 },
   acciones: {
     gap: 10, paddingHorizontal: espacio.l, paddingTop: 16, paddingBottom: 30,
