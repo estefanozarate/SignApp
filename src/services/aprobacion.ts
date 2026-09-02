@@ -21,6 +21,20 @@ export type Respuesta =
 
 const TIEMPO_LIMITE_MS = 15000;
 
+/**
+ * Timeout sin AbortController: la petición se abandona, no se cancela.
+ * Es peor en teoría —la conexión sigue viva un rato— pero no depende de una
+ * API cuya presencia varía entre versiones de React Native, y aquí lo que
+ * importa es no dejar al usuario esperando.
+ */
+function conTope<T>(promesa: Promise<T>, ms: number, mensaje: string): Promise<T> {
+  let temporizador: ReturnType<typeof setTimeout>;
+  const tope = new Promise<never>((_, falla) => {
+    temporizador = setTimeout(() => falla(new Error(mensaje)), ms);
+  });
+  return Promise.race([promesa, tope]).finally(() => clearTimeout(temporizador)) as Promise<T>;
+}
+
 export class CanalNavegador {
   private cerrada = false;
 
@@ -32,25 +46,21 @@ export class CanalNavegador {
 
   private async responder(r: Respuesta): Promise<void> {
     if (this.cerrada) throw new Error('Esta petición ya se cerró.');
+    if (!this.baseUrl) throw new Error('El código no indica dónde responder.');
 
-    const corte = new AbortController();
-    const t = setTimeout(() => corte.abort(), TIEMPO_LIMITE_MS);
-    try {
-      const res = await fetch(this.url, {
+    this.cerrada = true;
+    const res = await conTope(
+      fetch(this.url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(r),
-        signal: corte.signal,
-      });
-      if (res.status === 409) throw new Error('El sitio ya recibió una respuesta para esta petición.');
-      if (!res.ok) throw new Error(`El sitio no aceptó la respuesta (${res.status}).`);
-    } catch (e: any) {
-      if (e?.name === 'AbortError') throw new Error('El sitio no respondió a tiempo.');
-      throw e;
-    } finally {
-      clearTimeout(t);
-      this.cerrada = true;
-    }
+      }),
+      TIEMPO_LIMITE_MS,
+      'El sitio no respondió a tiempo.',
+    );
+
+    if (res.status === 409) throw new Error('El sitio ya recibió una respuesta para esta petición.');
+    if (!res.ok) throw new Error(`El sitio no aceptó la respuesta (${res.status}).`);
   }
 
   /**
