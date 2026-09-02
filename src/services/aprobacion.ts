@@ -5,12 +5,17 @@ import { Signing } from '../native/Signing';
  * Canal de retorno hacia el navegador.
  *
  * El reto ya viene firmado dentro del QR, así que por aquí no entra nada que
- * haya que creerse: solo sale la respuesta. El teléfono contesta la oferta
- * SDP del navegador y, cuando el DataChannel abre, manda la firma.
+ * haya que creerse: solo sale la respuesta.
  *
- * El relay de signaling solo ve el handshake. El reto y la firma van por el
- * DataChannel, cifrado extremo a extremo. Y si el navegador está en la misma
- * red, ni siquiera hace falta relay.
+ * Se intenta primero por DataChannel (P2P directo, sin que el relay vea
+ * nada) y, si no abre en unos segundos, se manda por el propio WebSocket.
+ *
+ * Ese respaldo no debilita el modelo: lo que viaja es una FIRMA, y su valor
+ * no viene del canal sino de la criptografía. El relay no puede falsificarla
+ * ni reutilizarla, porque cubre un reto que solo sirve una vez. Tampoco hay
+ * nada confidencial que ocultar: la clave pública no es un secreto. Depender
+ * de que el P2P se establezca —cosa que el NAT rompe a menudo— sería cambiar
+ * fiabilidad por una garantía que aquí no hace falta.
  */
 
 type Eventos = {
@@ -30,6 +35,8 @@ export class CanalNavegador {
   private pc?: RTCPeerConnection;
   private canal?: any;
   private cerrada = false;
+  /** ms de espera al DataChannel antes de tirar por el relay. */
+  private static readonly ESPERA_P2P = 5000;
   private pendiente?: { r: Respuesta; ok: () => void; falla: (e: Error) => void };
 
   constructor(
@@ -48,6 +55,8 @@ export class CanalNavegador {
     this.ws.onerror = () => this.fallar(new Error('No se pudo abrir el canal con el sitio.'));
     this.ws.onclose = () => { if (!this.cerrada) this.ev.onEstado?.('cerrado'); };
     this.ws.onmessage = (e) => this.enSenal(JSON.parse(String(e.data)));
+    // Con el WebSocket ya hay por dónde responder, aunque el P2P no cuaje.
+    this.ws.onopen = () => this.ev.onEstado?.('listo');
   }
 
   private async enSenal(m: any) {
@@ -61,21 +70,17 @@ export class CanalNavegador {
         (pc as any).addEventListener('icecandidate', (ev: any) => {
           if (ev.candidate) this.enviar({ type: 'ice', candidate: ev.candidate });
         });
-        (pc as any).addEventListener('connectionstatechange', () => {
-          if (['failed', 'disconnected'].includes((pc as any).connectionState)) {
-            this.fallar(new Error('Se perdió la conexión con el sitio.'));
-          }
-        });
 
         await pc.setRemoteDescription(new RTCSessionDescription(m.sdp));
         const respuesta = await pc.createAnswer();
         await pc.setLocalDescription(respuesta);
         this.enviar({ type: 'answer', sdp: pc.localDescription });
       } else if (m.type === 'ice' && this.pc) {
-        await this.pc.addIceCandidate(new RTCIceCandidate(m.candidate));
+        try { await this.pc.addIceCandidate(new RTCIceCandidate(m.candidate)); } catch {}
       }
     } catch (e) {
-      this.fallar(e as Error);
+      // Que falle el P2P no es fatal: queda el relay como camino de vuelta.
+      this.ev.onError?.(e as Error);
     }
   }
 
@@ -90,7 +95,6 @@ export class CanalNavegador {
         this.despachar(p.r).then(p.ok, p.falla);
       }
     });
-    canal.addEventListener('close', () => { if (!this.cerrada) this.ev.onEstado?.('cerrado'); });
   }
 
   /**
@@ -116,12 +120,23 @@ export class CanalNavegador {
 
     return new Promise((ok, falla) => {
       this.pendiente = { r, ok, falla };
-      // Si el canal no abre, no dejamos al usuario esperando para siempre.
       setTimeout(() => {
         if (this.pendiente?.r !== r) return;
         this.pendiente = undefined;
-        falla(new Error('El sitio no respondió a tiempo.'));
-      }, 20000);
+
+        // El P2P no cuajó. Va por el relay, que es igual de válido para una
+        // firma: el navegador la verifica criptográficamente de todos modos.
+        if (this.ws?.readyState === WebSocket.OPEN) {
+          try {
+            this.enviar(r);
+            ok();
+          } catch (e) {
+            falla(e as Error);
+          }
+          return;
+        }
+        falla(new Error('No hay conexión con el sitio.'));
+      }, CanalNavegador.ESPERA_P2P);
     });
   }
 
