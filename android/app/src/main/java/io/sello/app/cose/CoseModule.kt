@@ -145,9 +145,9 @@ class CoseModule(ctx: ReactApplicationContext) : ReactContextBaseJavaModule(ctx)
             }
 
             val sgu = texto(claims, "sgu")
-            if (sgu != null && !(sgu.startsWith("wss://") || sgu.startsWith("ws://127.0.0.1"))) {
-                // ws:// solo se tolera en loopback, donde no hay red que espiar.
-                fallar(promesa, "E_FORMATO", "El canal indicado no es seguro.", kid); return
+            if (sgu != null && !(sgu.startsWith("https://") || sgu.startsWith("http://127.0.0.1"))) {
+                // http:// solo se tolera en loopback, donde no hay red que espiar.
+                fallar(promesa, "E_FORMATO", "La dirección de respuesta no es segura.", kid); return
             }
 
             promesa.resolve(Arguments.createMap().apply {

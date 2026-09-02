@@ -24,7 +24,7 @@ type Paso = 'firma' | 'vigencia' | 'sesion';
 type Permiso = 'pidiendo' | 'concedido' | 'denegado' | 'bloqueado';
 
 const PASOS: { id: Paso; texto: string }[] = [
-  { id: 'firma', texto: 'Firma del navegador' },
+  { id: 'firma', texto: 'Autenticidad del código' },
   { id: 'vigencia', texto: 'Vigencia del código' },
   { id: 'sesion', texto: 'Navegador vinculado' },
 ];
@@ -71,7 +71,7 @@ export default function Escaner({ navigation }: Props) {
     if (procesando.current) return;
     procesando.current = true;
     setDetectado(true);
-    setPie('Código detectado. Comprobando su firma…');
+    setPie('Código detectado. Comprobando que sea auténtico…');
 
     try {
       const qr = await Cose.verificarQr(payload, await vinculos());
@@ -180,7 +180,7 @@ export default function Escaner({ navigation }: Props) {
 function mensajeDe(codigo: string) {
   switch (codigo) {
     case 'E_NO_VINCULADO': return 'Este navegador no está vinculado a tu teléfono.';
-    case 'E_FIRMA': return 'La firma del código no es válida.';
+    case 'E_FIRMA': return 'Este código fue alterado.';
     case 'E_EXPIRADO': return 'Este código ya caducó. Pide uno nuevo en el sitio.';
     default: return 'Este código no tiene el formato de Sello.';
   }

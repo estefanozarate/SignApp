@@ -257,7 +257,7 @@ class SigningModule(private val ctx: ReactApplicationContext) : ReactContextBase
             val info = BiometricPrompt.PromptInfo.Builder()
                 .setTitle(titulo)
                 .setSubtitle(subtitulo)
-                .setDescription("Se firmará dentro del chip seguro. Tu clave no sale del teléfono.")
+                .setDescription("La aprobación se genera dentro del chip seguro. Nada sale del teléfono.")
                 // Sin setNegativeButtonText: con DEVICE_CREDENTIAL permitido, el
                 // sistema pone su propio botón y declarar uno propio lanza excepción.
                 .setAllowedAuthenticators(AUTENTICADORES)
