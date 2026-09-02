@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useRef, useState } from 'react';
 import { Alert, Pressable, ScrollView, StyleSheet, View } from 'react-native';
 import { NativeStackScreenProps } from '@react-navigation/native-stack';
 import Pantalla from '../components/Pantalla';
@@ -22,23 +22,8 @@ type Props = NativeStackScreenProps<Rutas, 'Vincular'>;
 export default function Vincular({ navigation, route }: Props) {
   const { qr } = route.params;
   const { identidad } = useSesion();
-  const canal = useRef<CanalNavegador | null>(null);
-  const [estado, setEstado] = useState<'conectando' | 'listo' | 'cerrado'>('conectando');
+  const canal = useRef(new CanalNavegador(qr.signalingUrl ?? '', qr.sessionId));
   const [enviando, setEnviando] = useState(false);
-
-  useEffect(() => {
-    if (!qr.signalingUrl) return;
-    const c = new CanalNavegador(qr.signalingUrl, qr.sessionId, {
-      onEstado: setEstado,
-      onError: (e: Error) => {
-        Alert.alert('Se cortó la conexión', e.message);
-        navigation.navigate('Inicio');
-      },
-    });
-    canal.current = c;
-    c.conectar();
-    return () => c.cerrar();
-  }, [qr, navigation]);
 
   const aceptar = async () => {
     if (!identidad) return;
@@ -52,7 +37,7 @@ export default function Vincular({ navigation, route }: Props) {
         spkiB64: qr.clavePublicaB64,
         nombre: qr.accion,
       });
-      await canal.current?.vincular(
+      await canal.current.vincular(
         identidad.clavePublicaSpkiB64,
         identidad.keyId,
         'Sello Android',
@@ -66,16 +51,14 @@ export default function Vincular({ navigation, route }: Props) {
   };
 
   const rechazar = () => {
-    canal.current?.rechazar();
+    canal.current.rechazar();
     navigation.navigate('Inicio');
   };
 
   return (
     <Pantalla>
       <View style={s.appbar}>
-        <Pildora estado={estado === 'listo' ? 'ok' : 'esp'}>
-          {estado === 'listo' ? 'Canal cifrado con el sitio' : 'Conectando con el sitio'}
-        </Pildora>
+        <Pildora estado="ok">Código verificado</Pildora>
         <Pressable onPress={rechazar} style={s.iconbtn} accessibilityLabel="Cerrar">
           <Cerrar />
         </Pressable>
@@ -92,7 +75,7 @@ export default function Vincular({ navigation, route }: Props) {
           <Fila etiqueta="Huella del navegador" primera>
             <Mono>{qr.kid.replace(/(.{4})/g, '$1 ').trim()}</Mono>
           </Fila>
-          <Fila etiqueta="Tu clave">
+          <Fila etiqueta="Tu identidad">
             <Mono>{identidad ? `${identidad.keyId.slice(0, 8)}··${identidad.keyId.slice(-4)}` : '—'}</Mono>
           </Fila>
         </Tarjeta>
@@ -100,7 +83,7 @@ export default function Vincular({ navigation, route }: Props) {
         <Minima style={{ marginBottom: 26 }}>
           Compara la huella con la que muestra la pantalla del sitio. Si no coincide, no aceptes:
           alguien podría estar interponiéndose.{'\n\n'}
-          Se envía tu clave pública, que no es un secreto. Tu clave privada no sale del chip.
+          Solo se envía la parte pública de tu identidad, que no es un secreto. Lo demás no sale del chip.
         </Minima>
       </ScrollView>
 

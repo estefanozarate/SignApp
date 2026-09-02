@@ -1,143 +1,56 @@
-import { RTCIceCandidate, RTCPeerConnection, RTCSessionDescription } from 'react-native-webrtc';
 import { Signing } from '../native/Signing';
 
 /**
- * Canal de retorno hacia el navegador.
+ * Canal de retorno hacia el navegador: un POST.
  *
  * El reto ya viene firmado dentro del QR, así que por aquí no entra nada que
- * haya que creerse: solo sale la respuesta.
+ * haya que creerse. Solo sale la respuesta, y la respuesta es una FIRMA.
  *
- * Se intenta primero por DataChannel (P2P directo, sin que el relay vea
- * nada) y, si no abre en unos segundos, se manda por el propio WebSocket.
- *
- * Ese respaldo no debilita el modelo: lo que viaja es una FIRMA, y su valor
- * no viene del canal sino de la criptografía. El relay no puede falsificarla
- * ni reutilizarla, porque cubre un reto que solo sirve una vez. Tampoco hay
- * nada confidencial que ocultar: la clave pública no es un secreto. Depender
- * de que el P2P se establezca —cosa que el NAT rompe a menudo— sería cambiar
- * fiabilidad por una garantía que aquí no hace falta.
+ * Antes esto era WebRTC con signaling, SDP y candidatos ICE. Se quitó porque
+ * el valor de una firma está en la criptografía, no en el canal: el servidor
+ * no puede falsificarla ni reutilizarla —cubre un reto de un solo uso— y no
+ * hay nada confidencial que ocultar, porque una clave pública no es un
+ * secreto. El P2P costaba NAT, STUN, TURN y fallos intermitentes a cambio de
+ * una garantía que aquí no hacía falta.
  */
-
-type Eventos = {
-  onEstado?: (e: 'conectando' | 'listo' | 'cerrado') => void;
-  onError?: (e: Error) => void;
-};
-
-const HIELO = [{ urls: 'stun:stun.l.google.com:19302' }];
 
 export type Respuesta =
   | { type: 'signature'; signature: string; key_id: string }
   | { type: 'paired'; public_key: string; key_id: string; device: string }
   | { type: 'denied'; reason: string };
 
+const TIEMPO_LIMITE_MS = 15000;
+
 export class CanalNavegador {
-  private ws?: WebSocket;
-  private pc?: RTCPeerConnection;
-  private canal?: any;
   private cerrada = false;
-  /** ms de espera al DataChannel antes de tirar por el relay. */
-  private static readonly ESPERA_P2P = 5000;
-  private pendiente?: { r: Respuesta; ok: () => void; falla: (e: Error) => void };
 
-  constructor(
-    private signalingUrl: string,
-    private sessionId: string,
-    private ev: Eventos = {},
-  ) {}
+  constructor(private baseUrl: string, private sessionId: string) {}
 
-  conectar() {
-    this.ev.onEstado?.('conectando');
-    const url = `${this.signalingUrl}?session_id=${encodeURIComponent(this.sessionId)}`;
-    // Sin backend no hay token: el session_id del QR es la única credencial,
-    // por eso lo genera un CSPRNG y caduca en minutos.
-    this.ws = new WebSocket(url);
-
-    this.ws.onerror = () => this.fallar(new Error('No se pudo abrir el canal con el sitio.'));
-    this.ws.onclose = () => { if (!this.cerrada) this.ev.onEstado?.('cerrado'); };
-    this.ws.onmessage = (e) => this.enSenal(JSON.parse(String(e.data)));
-    // Con el WebSocket ya hay por dónde responder, aunque el P2P no cuaje.
-    this.ws.onopen = () => this.ev.onEstado?.('listo');
+  private get url() {
+    return `${this.baseUrl.replace(/\/$/, '')}/respuesta?session_id=${encodeURIComponent(this.sessionId)}`;
   }
 
-  private async enSenal(m: any) {
+  private async responder(r: Respuesta): Promise<void> {
+    if (this.cerrada) throw new Error('Esta petición ya se cerró.');
+
+    const corte = new AbortController();
+    const t = setTimeout(() => corte.abort(), TIEMPO_LIMITE_MS);
     try {
-      if (m.type === 'offer') {
-        const pc = new RTCPeerConnection({ iceServers: HIELO });
-        this.pc = pc;
-
-        // El navegador crea el DataChannel; nosotros lo recibimos.
-        (pc as any).addEventListener('datachannel', (ev: any) => this.enCanal(ev.channel));
-        (pc as any).addEventListener('icecandidate', (ev: any) => {
-          if (ev.candidate) this.enviar({ type: 'ice', candidate: ev.candidate });
-        });
-
-        await pc.setRemoteDescription(new RTCSessionDescription(m.sdp));
-        const respuesta = await pc.createAnswer();
-        await pc.setLocalDescription(respuesta);
-        this.enviar({ type: 'answer', sdp: pc.localDescription });
-      } else if (m.type === 'ice' && this.pc) {
-        try { await this.pc.addIceCandidate(new RTCIceCandidate(m.candidate)); } catch {}
-      }
-    } catch (e) {
-      // Que falle el P2P no es fatal: queda el relay como camino de vuelta.
-      this.ev.onError?.(e as Error);
+      const res = await fetch(this.url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(r),
+        signal: corte.signal,
+      });
+      if (res.status === 409) throw new Error('El sitio ya recibió una respuesta para esta petición.');
+      if (!res.ok) throw new Error(`El sitio no aceptó la respuesta (${res.status}).`);
+    } catch (e: any) {
+      if (e?.name === 'AbortError') throw new Error('El sitio no respondió a tiempo.');
+      throw e;
+    } finally {
+      clearTimeout(t);
+      this.cerrada = true;
     }
-  }
-
-  private enCanal(canal: any) {
-    this.canal = canal;
-    canal.addEventListener('open', () => {
-      this.ev.onEstado?.('listo');
-      // Si el usuario aprobó antes de que el canal abriera, sale ahora.
-      const p = this.pendiente;
-      if (p) {
-        this.pendiente = undefined;
-        this.despachar(p.r).then(p.ok, p.falla);
-      }
-    });
-  }
-
-  /**
-   * Envía y espera a que salga de verdad. `send` solo encola en el buffer del
-   * DataChannel: cerrar inmediatamente después descarta el mensaje.
-   */
-  private async despachar(r: Respuesta) {
-    this.canal.send(JSON.stringify(r));
-    const limite = Date.now() + 3000;
-    while (this.canal.bufferedAmount > 0 && Date.now() < limite) {
-      await new Promise<void>(res => setTimeout(res, 50));
-    }
-  }
-
-  /**
-   * Encola si el canal aún no abrió: el usuario no debería esperar a la red
-   * para poner su PIN. La promesa resuelve cuando el mensaje ya salió, y
-   * quien llama no debe cerrar la pantalla antes de eso.
-   */
-  private responder(r: Respuesta): Promise<void> {
-    if (this.cerrada) return Promise.reject(new Error('El canal ya estaba cerrado.'));
-    if (this.canal?.readyState === 'open') return this.despachar(r);
-
-    return new Promise((ok, falla) => {
-      this.pendiente = { r, ok, falla };
-      setTimeout(() => {
-        if (this.pendiente?.r !== r) return;
-        this.pendiente = undefined;
-
-        // El P2P no cuajó. Va por el relay, que es igual de válido para una
-        // firma: el navegador la verifica criptográficamente de todos modos.
-        if (this.ws?.readyState === WebSocket.OPEN) {
-          try {
-            this.enviar(r);
-            ok();
-          } catch (e) {
-            falla(e as Error);
-          }
-          return;
-        }
-        falla(new Error('No hay conexión con el sitio.'));
-      }, CanalNavegador.ESPERA_P2P);
-    });
   }
 
   /**
@@ -152,26 +65,13 @@ export class CanalNavegador {
 
   /** En la vinculación lo que viaja es la clave PÚBLICA: no es un secreto. */
   async vincular(clavePublicaSpkiB64: string, keyId: string, dispositivo: string) {
-    await this.responder({ type: 'paired', public_key: clavePublicaSpkiB64, key_id: keyId, device: dispositivo });
+    await this.responder({
+      type: 'paired', public_key: clavePublicaSpkiB64, key_id: keyId, device: dispositivo,
+    });
   }
 
+  /** El rechazo se avisa, pero si no llega tampoco pasa nada: el QR caduca. */
   rechazar(motivo = 'user_denied') {
-    // Sin await: rechazar no debe bloquear al usuario si el canal no abrió.
     this.responder({ type: 'denied', reason: motivo }).catch(() => {});
   }
-
-  /** Nada queda abierto después de responder. */
-  cerrar() {
-    if (this.cerrada) return;
-    this.cerrada = true;
-    this.pendiente?.falla(new Error('El canal se cerró antes de responder.'));
-    this.pendiente = undefined;
-    try { this.canal?.close(); } catch {}
-    try { this.pc?.close(); } catch {}
-    try { this.ws?.close(); } catch {}
-    this.ev.onEstado?.('cerrado');
-  }
-
-  private enviar(m: unknown) { this.ws?.send(JSON.stringify(m)); }
-  private fallar(e: Error) { this.ev.onError?.(e); this.cerrar(); }
 }

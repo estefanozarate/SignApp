@@ -17,8 +17,7 @@
     "react-native-camera-kit": "18.0.1",
     "react-native-safe-area-context": "^5.9.1",
     "react-native-screens": "^4.27.0",
-    "react-native-svg": "^15.15.5",
-    "react-native-webrtc": "^124.0.8"
+    "react-native-svg": "^15.15.5"
   },
   "devDependencies": {
     "@react-native-community/cli": "^20.2.0",
