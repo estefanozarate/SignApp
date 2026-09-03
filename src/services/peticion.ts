@@ -2,26 +2,29 @@ import { Signing } from '../native/Signing';
 import { bytesAB64, textoABytes } from '../lib/aleatorio';
 
 /**
- * Petición de un dominio, verificada por HTTPS.
- *
- * El QR ya no lleva firma ni CBOR: solo una URL. La app la consulta y el
- * dominio responde qué pide realmente. La autenticidad viene del certificado
- * TLS, que el sistema valida — no de una clave de emisor que habría que
- * distribuir y rotar.
- *
- * Lo que el usuario ve en pantalla sale SIEMPRE de esta respuesta, nunca del
- * QR. Si el QR mintiera sobre la acción, no serviría de nada: no es la fuente.
+ * Petición de un dominio, verificada contra el propio dominio por HTTPS.
+ * Implementa §4.2, §5, §6 y §7 de diseno_app.md.
  */
 
-export type Peticion = {
-  request_id: string;
+/** §4.2 — lo que el QR contiene, y nada más. */
+export type ContenidoQr = {
+  version: number;
+  action: 'PAIR' | 'SECRET_REQUEST';
   domain: string;
-  action: string;
-  account?: string;
+  request_id: string;
   nonce: string;
+};
+
+/** §6 — la identidad del dominio, tras verificar. */
+export type Peticion = ContenidoQr & {
+  domain_id: string;
+  domain_public_key: string;
+  purpose: 'PAIR' | 'SECRET_REQUEST';
+  action_texto: string;
+  account?: string;
   issued_at: number;
   expires_at: number;
-  /** Origen del que se descargó, para atarlo todo a un mismo sitio. */
+  /** Base de la que se descargó, construida por la app a partir de domain. */
   origen: string;
 };
 
@@ -30,115 +33,150 @@ export class PeticionInvalida extends Error {
 }
 
 const TIEMPO_LIMITE_MS = 12000;
+const ACCIONES = ['PAIR', 'SECRET_REQUEST'];
 
 function conTope<T>(p: Promise<T>, ms: number, mensaje: string): Promise<T> {
   let t: ReturnType<typeof setTimeout>;
-  const tope = new Promise<never>((_, falla) => { t = setTimeout(() => falla(new PeticionInvalida('E_RED', mensaje)), ms); });
+  const tope = new Promise<never>((_, falla) => {
+    t = setTimeout(() => falla(new PeticionInvalida('E_RED', mensaje)), ms);
+  });
   return Promise.race([p, tope]).finally(() => clearTimeout(t)) as Promise<T>;
 }
 
-/**
- * Comprueba la URL antes de tocar la red.
- *
- * http:// solo se acepta en loopback, donde no hay red que espiar. Sin esto,
- * un QR podría mandar a la app a un servidor en claro y todo el modelo se
- * apoyaría en nada.
- */
-export function urlDePeticion(qr: string): URL {
-  let u: URL;
+/** §4.2 — se lee el QR y se comprueba su forma antes de tocar la red. */
+export function leerQr(texto: string): ContenidoQr {
+  let q: any;
   try {
-    u = new URL(qr.trim());
+    q = JSON.parse(texto.trim());
   } catch {
-    throw new PeticionInvalida('E_FORMATO', 'Este código no contiene una dirección válida.');
+    throw new PeticionInvalida('E_FORMATO', 'Este código no es de Sello.');
   }
-
-  const seguro = u.protocol === 'https:' ||
-    (u.protocol === 'http:' && (u.hostname === '127.0.0.1' || u.hostname === 'localhost'));
-  if (!seguro) {
-    throw new PeticionInvalida('E_INSEGURO', 'Este código apunta a una dirección sin cifrar.');
+  if (q?.version !== 1) {
+    throw new PeticionInvalida('E_VERSION', 'Este código es de otra versión del protocolo.');
   }
-  if (!/^\/verificar\/[0-9a-f]{32}$/i.test(u.pathname)) {
-    throw new PeticionInvalida('E_FORMATO', 'Este código no tiene el formato de Sello.');
+  if (!ACCIONES.includes(q.action)) {
+    throw new PeticionInvalida('E_FORMATO', 'Este código pide una operación desconocida.');
   }
-  return u;
+  if (typeof q.domain !== 'string' || !q.domain ||
+      typeof q.request_id !== 'string' || !/^[0-9a-f]{32}$/i.test(q.request_id) ||
+      typeof q.nonce !== 'string' || q.nonce.length < 20) {
+    throw new PeticionInvalida('E_FORMATO', 'A este código le faltan datos.');
+  }
+  return q as ContenidoQr;
 }
 
-/** Pregunta al dominio qué pide de verdad. */
-export async function verificar(qr: string): Promise<Peticion> {
-  const u = urlDePeticion(qr);
+/**
+ * §5 — la app construye ella misma la dirección a partir del dominio del QR.
+ *
+ * El documento es explícito: no debe confiar en una URL de verificación
+ * suministrada por el QR. Si el QR trajera la URL, un atacante podría poner
+ * un dominio en el texto y mandar la consulta a otro servidor.
+ *
+ * http:// solo se tolera en loopback, para desarrollo local.
+ */
+function baseDe(dominio: string): string {
+  const loopback = dominio.startsWith('127.0.0.1') || dominio.startsWith('localhost');
+  const esquema = loopback ? 'http' : 'https';
+  const limpio = dominio.replace(/^https?:\/\//, '').replace(/\/.*$/, '');
+  if (!/^[a-z0-9.\-]+(:\d+)?$/i.test(limpio)) {
+    throw new PeticionInvalida('E_FORMATO', 'El dominio del código no es válido.');
+  }
+  return `${esquema}://${limpio}`;
+}
+
+/** §5 y §6 — verificar contra el dominio y comprobar que la respuesta cuadra. */
+export async function verificar(textoQr: string): Promise<Peticion> {
+  const qr = leerQr(textoQr);
+  const origen = baseDe(qr.domain);
 
   const res = await conTope(
-    fetch(u.toString(), { headers: { Accept: 'application/json' } }),
+    fetch(`${origen}/verificar/${qr.request_id}`, { headers: { Accept: 'application/json' } }),
     TIEMPO_LIMITE_MS,
     'El sitio no respondió a tiempo.',
   );
 
-  if (res.status === 404) throw new PeticionInvalida('E_NO_EXISTE', 'Este código ya no existe en el sitio.');
+  if (res.status === 404) throw new PeticionInvalida('E_NO_EXISTE', 'El sitio no reconoce esta petición.');
   if (res.status === 410) throw new PeticionInvalida('E_EXPIRADA', 'Este código ya caducó.');
   if (res.status === 409) throw new PeticionInvalida('E_USADA', 'Este código ya se usó una vez.');
+  if (res.status === 403) throw new PeticionInvalida('E_NO_AUTORIZADA', 'El sitio no autorizó esta petición.');
   if (!res.ok) throw new PeticionInvalida('E_RED', `El sitio respondió ${res.status}.`);
 
-  const p = await res.json();
-  const origen = u.origin;
+  const r = await res.json();
 
-  // El dominio que declara la respuesta tiene que ser el mismo del que se
-  // descargó. Si no, alguien está reenviando la petición de otro sitio.
-  if (!p?.domain || !origen.includes(String(p.domain).split(':')[0])) {
-    throw new PeticionInvalida('E_DOMINIO', 'El sitio declara un dominio que no es el suyo.');
+  // §6 — las tres comparaciones. Sin ellas, el dominio podría responder
+  // cualquier cosa y la app se la creería.
+  if (r.status !== 'authorized') {
+    throw new PeticionInvalida('E_NO_AUTORIZADA', 'El sitio no autorizó esta petición.');
   }
-  if (!p.request_id || !p.nonce || !p.action) {
-    throw new PeticionInvalida('E_FORMATO', 'Al sitio le faltan datos en la petición.');
+  if (r.domain !== qr.domain) {
+    throw new PeticionInvalida('E_DOMINIO', 'El sitio responde por un dominio distinto del que dice el código.');
   }
-  if (Number(p.expires_at) < Math.floor(Date.now() / 1000)) {
+  if (r.request_id !== qr.request_id) {
+    throw new PeticionInvalida('E_DOMINIO', 'El sitio responde sobre otra petición.');
+  }
+  if (r.nonce !== qr.nonce) {
+    throw new PeticionInvalida('E_NONCE', 'El sitio devolvió un nonce que no coincide con el código.');
+  }
+  // §19 — el propósito debe ser el mismo: una petición de vinculación no
+  // puede convertirse en una de entrega de secreto por el camino.
+  if (r.purpose !== qr.action) {
+    throw new PeticionInvalida('E_PROPOSITO', 'El sitio cambió el propósito de la petición.');
+  }
+  if (!r.domain_id || !r.domain_public_key) {
+    throw new PeticionInvalida('E_FORMATO', 'El sitio no envió su identidad.');
+  }
+  if (Number(r.expires_at) < Math.floor(Date.now() / 1000)) {
     throw new PeticionInvalida('E_EXPIRADA', 'Este código ya caducó.');
   }
 
-  return { ...p, origen };
+  return {
+    ...qr,
+    domain_id: r.domain_id,
+    domain_public_key: r.domain_public_key,
+    purpose: r.purpose,
+    action_texto: r.action ?? 'Aprobar una acción',
+    account: r.account,
+    issued_at: Number(r.issued_at),
+    expires_at: Number(r.expires_at),
+    origen,
+  };
 }
 
 /**
- * Lo que se firma: separador de dominio + los campos que el usuario vio.
+ * §7 — Prueba de posesión.
  *
- * No se firma el nonce a secas. La firma queda atada al dominio, la acción y
- * la cuenta concretos, así que no vale para autorizar ninguna otra cosa —
- * y lo que se muestra en pantalla es exactamente lo que se aprueba.
+ * Se firma dominio + request_id + nonce + contexto. Queda atada a ESTE
+ * emparejamiento: una prueba de otro no vale, y no expone la clave privada.
+ * El separador 0x1f no aparece en texto normal, así que dos contextos
+ * distintos no pueden producir la misma cadena al concatenar campos.
  */
-export function retoDe(p: Peticion): string {
-  const partes = [
-    'sello/aprobacion/v2',
+export function contextoDe(p: ContenidoQr, contexto: string): string {
+  return bytesAB64(textoABytes([
+    'sello/prueba/v1',
+    contexto,
     p.domain,
     p.request_id,
-    p.action,
-    p.account ?? '',
-    String(p.expires_at),
     p.nonce,
-  ];
-  // El separador 0x1f no aparece en texto normal, así que dos peticiones
-  // distintas no pueden producir la misma cadena juntando campos.
-  return bytesAB64(textoABytes(partes.join('\u001f')));
+  ].join('\u001f')));
 }
 
-/** Aprueba: firma dentro del chip y entrega la respuesta al dominio. */
-export async function aprobar(p: Peticion) {
+/** Firma la prueba de posesión dentro del chip. */
+export async function pruebaDePosesion(p: Peticion, contexto: string) {
   const { firmaDerB64, keyId } = await Signing.firmar(
-    retoDe(p),
-    p.action,
+    contextoDe(p, contexto),
+    p.action_texto,
     p.domain,
   );
-  await entregar(p, { type: 'approved', signature: firmaDerB64, key_id: keyId });
-  return { firmaDerB64, keyId };
+  return { proof: firmaDerB64, app_id: keyId };
 }
 
-export async function rechazar(p: Peticion) {
-  await entregar(p, { type: 'denied', reason: 'user_denied' }).catch(() => {});
-}
-
-async function entregar(p: Peticion, cuerpo: unknown) {
+/** Entrega la respuesta al dominio, con el contexto de esta petición (§15). */
+export async function responder(p: Peticion, cuerpo: Record<string, unknown>) {
   const res = await conTope(
     fetch(`${p.origen}/respuesta/${p.request_id}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(cuerpo),
+      body: JSON.stringify({ ...cuerpo, request_id: p.request_id, nonce: p.nonce }),
     }),
     TIEMPO_LIMITE_MS,
     'El sitio no respondió a tiempo.',
@@ -146,4 +184,8 @@ async function entregar(p: Peticion, cuerpo: unknown) {
   if (res.status === 409) throw new PeticionInvalida('E_USADA', 'El sitio ya recibió una respuesta.');
   if (res.status === 410) throw new PeticionInvalida('E_EXPIRADA', 'La petición caducó antes de enviarla.');
   if (!res.ok) throw new PeticionInvalida('E_RED', `El sitio no aceptó la respuesta (${res.status}).`);
+}
+
+export async function rechazar(p: Peticion) {
+  await responder(p, { type: 'DENIED', reason: 'user_denied' }).catch(() => {});
 }
