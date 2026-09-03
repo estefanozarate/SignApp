@@ -5,9 +5,8 @@ import Pantalla from '../components/Pantalla';
 import { Boton, Ceja, Cuerpo, Fila, Minima, Origen, Pildora, Tarjeta } from '../components/ui';
 import { Cerrar, Check } from '../components/Iconos';
 import { color, espacio, radio, tipo } from '../theme';
-import { CanalNavegador } from '../services/aprobacion';
+import { aprobar, rechazar, retoDe, PeticionInvalida } from '../services/peticion';
 import { BiometriaCancelada, ClaveInvalidada } from '../native/Signing';
-import { marcarUso } from '../services/vinculos';
 import { anotar } from '../services/actividad';
 import { retoLegible } from '../lib/b64';
 import { Rutas } from '../navigation/tipos';
@@ -15,54 +14,38 @@ import { Rutas } from '../navigation/tipos';
 type Props = NativeStackScreenProps<Rutas, 'Aprobacion'>;
 
 export default function Aprobacion({ navigation, route }: Props) {
-  const { qr } = route.params;
-  const canal = useRef<CanalNavegador | null>(null);
-  const [estado, setEstado] = useState<'conectando' | 'listo' | 'cerrado'>('conectando');
-  const [firmando, setFirmando] = useState(false);
-  const [restante, setRestante] = useState(qr.expiraEn - Math.floor(Date.now() / 1000));
+  const { peticion } = route.params;
+  const [ocupado, setOcupado] = useState(false);
+  const [restante, setRestante] = useState(peticion.expires_at - Math.floor(Date.now() / 1000));
   const [detalles, setDetalles] = useState(false);
+  const resuelto = useRef(false);
 
-  useEffect(() => {
-    if (!qr.signalingUrl) return;
-    const c = new CanalNavegador(qr.signalingUrl, qr.sessionId, {
-      onEstado: setEstado,
-      onError: (e: Error) => {
-        Alert.alert('Se cortó la conexión', e.message);
-        navigation.navigate('Inicio');
-      },
-    });
-    canal.current = c;
-    c.conectar();
-    return () => c.cerrar();
-  }, [qr, navigation]);
-
-  // La caducidad la fija el QR firmado; al llegar a cero no se aprueba nada.
+  // La caducidad la fija el dominio; al llegar a cero no se aprueba nada.
   useEffect(() => {
     const t = setInterval(() => {
-      const quedan = qr.expiraEn - Math.floor(Date.now() / 1000);
+      const quedan = peticion.expires_at - Math.floor(Date.now() / 1000);
       setRestante(quedan);
-      if (quedan <= 0) {
+      if (quedan <= 0 && !resuelto.current) {
+        resuelto.current = true;
         clearInterval(t);
-        canal.current?.rechazar('expired');
-        navigation.replace('NoVerificado', { motivo: 'E_EXPIRADO' });
+        navigation.replace('NoVerificado', { motivo: 'E_EXPIRADA' });
       }
     }, 1000);
     return () => clearInterval(t);
-  }, [qr, navigation]);
+  }, [peticion, navigation]);
 
   const reloj = useMemo(() => {
     const q = Math.max(0, restante);
     return `${Math.floor(q / 60)}:${String(q % 60).padStart(2, '0')}`;
   }, [restante]);
 
-  const aprobar = async () => {
-    setFirmando(true);
+  const confirmar = async () => {
+    setOcupado(true);
     try {
-      const accion = qr.accion ?? 'Aprobar una acción';
-      const { firmaDerB64, keyId } = await canal.current!.aprobar(qr.retoB64, accion, qr.origen);
-      await marcarUso(qr.kid, qr.origen);
-      await anotar({ origen: qr.origen, accion, resultado: 'aprobado' });
-      navigation.replace('Firmado', { firmaDerB64, keyId, origen: qr.origen });
+      const { firmaDerB64, keyId } = await aprobar(peticion);
+      resuelto.current = true;
+      await anotar({ origen: peticion.domain, accion: peticion.action, resultado: 'aprobado' });
+      navigation.replace('Firmado', { firmaDerB64, keyId, origen: peticion.domain });
     } catch (e: any) {
       if (e instanceof BiometriaCancelada) return; // puede reintentar
       if (e instanceof ClaveInvalidada) {
@@ -73,58 +56,58 @@ export default function Aprobacion({ navigation, route }: Props) {
         navigation.navigate('Dispositivo');
         return;
       }
+      // Si el sitio ya no acepta la respuesta, el motivo importa: puede ser
+      // que alguien más la haya usado.
+      if (e instanceof PeticionInvalida) {
+        resuelto.current = true;
+        navigation.replace('NoVerificado', { motivo: e.codigo, detalle: e.message });
+        return;
+      }
       Alert.alert('No se pudo aprobar', e?.message ?? 'Error desconocido.');
     } finally {
-      setFirmando(false);
+      setOcupado(false);
     }
   };
 
-  const rechazar = async () => {
-    canal.current?.rechazar();
-    await anotar({
-      origen: qr.origen,
-      accion: qr.accion ?? 'Aprobar una acción',
-      resultado: 'rechazado',
-    });
+  const denegar = async () => {
+    resuelto.current = true;
+    await rechazar(peticion);
+    await anotar({ origen: peticion.domain, accion: peticion.action, resultado: 'rechazado' });
     navigation.navigate('Inicio');
   };
 
   return (
     <Pantalla>
       <View style={s.appbar}>
-        <Pildora estado={estado === 'listo' ? 'ok' : 'esp'}>
-          {estado === 'listo' ? 'Canal cifrado con el sitio' : 'Conectando con el sitio'}
-        </Pildora>
-        <Pressable onPress={rechazar} style={s.iconbtn} accessibilityLabel="Cerrar">
+        <Pildora estado="ok">Sitio verificado</Pildora>
+        <Pressable onPress={denegar} style={s.iconbtn} accessibilityLabel="Cerrar">
           <Cerrar />
         </Pressable>
       </View>
 
       <ScrollView contentContainerStyle={s.cuerpo} showsVerticalScrollIndicator={false}>
         <Ceja style={{ marginBottom: 10 }}>Solicita tu aprobación</Ceja>
-        <Origen style={{ marginBottom: 6 }}>{qr.origen}</Origen>
+        <Origen style={{ marginBottom: 6 }}>{peticion.domain}</Origen>
         <Cuerpo style={{ marginBottom: 22 }}>
-          {qr.accion ?? 'Quiere que apruebes una acción'}
-          {qr.cuenta ? ` como ${qr.cuenta}.` : '.'}
+          {peticion.action}
+          {peticion.account ? ` como ${peticion.account}.` : '.'}
         </Cuerpo>
 
         <Tarjeta style={{ marginBottom: 14 }}>
-          <Fila etiqueta="Navegador" primera>
-            <Pildora estado="ok">Vinculado</Pildora>
-          </Fila>
+          <Fila etiqueta="Confirmado por" primera>{peticion.domain}</Fila>
           <Fila etiqueta="Caduca en">
             <Text style={[tipo.mono, restante <= 30 && { color: color.carmin }]}>{reloj}</Text>
           </Fila>
         </Tarjeta>
 
         <Minima style={{ marginBottom: 14 }}>
-          Tu aprobación queda ligada a esta petición y a ninguna otra. Se genera dentro del
-          chip seguro y no sale nada de tu teléfono salvo la respuesta.
+          Esto lo confirmó el propio sitio por conexión segura, no el código que escaneaste.
+          Tu aprobación queda ligada a esta petición y a ninguna otra.
         </Minima>
 
         {/* El código de verificación no se muestra de entrada: la mayoría no lo
-            necesita. Pero no se elimina, porque es lo único que permite
-            comparar a mano con lo que muestra el sitio ante una sospecha. */}
+            necesita. Pero no se elimina, porque permite comparar a mano con lo
+            que muestra el sitio ante una sospecha. */}
         <Pressable
           onPress={() => {
             LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
@@ -140,11 +123,11 @@ export default function Aprobacion({ navigation, route }: Props) {
           <>
             <View style={s.reto}>
               <Text style={[tipo.mono, { color: color.grafito, lineHeight: 20 }]}>
-                {retoLegible(qr.retoB64)}
+                {retoLegible(retoDe(peticion))}
               </Text>
             </View>
             <Minima style={{ marginTop: 10 }}>
-              Debe coincidir con el que muestra {qr.origen}. Si no coincide, rechaza.
+              Debe coincidir con el que muestra {peticion.domain}. Si no coincide, rechaza.
             </Minima>
           </>
         ) : null}
@@ -152,14 +135,8 @@ export default function Aprobacion({ navigation, route }: Props) {
       </ScrollView>
 
       <View style={s.acciones}>
-        <Boton
-          onPress={aprobar}
-          cargando={firmando}
-          deshabilitado={estado !== 'listo'}
-          icono={<Check />}>
-          {estado === 'listo' ? 'Aprobar' : 'Esperando al sitio…'}
-        </Boton>
-        <Boton variante="peligro" onPress={rechazar}>Rechazar</Boton>
+        <Boton onPress={confirmar} cargando={ocupado} icono={<Check />}>Aprobar</Boton>
+        <Boton variante="peligro" onPress={denegar}>Rechazar</Boton>
       </View>
     </Pantalla>
   );
