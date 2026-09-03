@@ -12,7 +12,6 @@ import Bienvenida from './screens/Bienvenida';
 import Inicio from './screens/Inicio';
 import Escaner from './screens/Escaner';
 import NoVerificado from './screens/NoVerificado';
-import Vincular from './screens/Vincular';
 import Aprobacion from './screens/Aprobacion';
 import Firmado from './screens/Firmado';
 import Dispositivo from './screens/Dispositivo';
@@ -46,7 +45,6 @@ function Rutero() {
           <Stack.Screen name="Inicio" component={Inicio} />
           <Stack.Screen name="Escaner" component={Escaner} options={{ animation: 'slide_from_bottom' }} />
           <Stack.Screen name="NoVerificado" component={NoVerificado} />
-          <Stack.Screen name="Vincular" component={Vincular} />
           <Stack.Screen name="Aprobacion" component={Aprobacion} />
           <Stack.Screen name="Firmado" component={Firmado} />
           <Stack.Screen name="Dispositivo" component={Dispositivo} options={{ animation: 'slide_from_right' }} />

@@ -2,7 +2,7 @@ import React from 'react';
 import { Pressable, StyleSheet, View } from 'react-native';
 import { NativeStackScreenProps } from '@react-navigation/native-stack';
 import Pantalla from '../components/Pantalla';
-import { Boton, Cuerpo, Fila, H2, Mono, Tarjeta } from '../components/ui';
+import { Boton, Cuerpo, H2 } from '../components/ui';
 import { Alerta, Cerrar } from '../components/Iconos';
 import { color, espacio, tipo } from '../theme';
 import { Text } from 'react-native';
@@ -11,17 +11,29 @@ import { Rutas } from '../navigation/tipos';
 type Props = NativeStackScreenProps<Rutas, 'NoVerificado'>;
 
 const TEXTOS: Record<string, { titulo: string; cuerpo: string }> = {
-  E_NO_VINCULADO: {
-    titulo: 'Este navegador no está vinculado a tu teléfono.',
-    cuerpo: 'Solo los navegadores que vinculaste pueden pedirte aprobaciones. Si es tuyo, vincúlalo primero desde el sitio. No se abrió ninguna conexión y no se aprobó nada.',
+  E_INSEGURO: {
+    titulo: 'Este código apunta a una dirección sin cifrar.',
+    cuerpo: 'Sello solo habla con sitios por conexión segura. Nadie podría garantizar que la petición viene de quien dice.',
   },
-  E_FIRMA: {
-    titulo: 'Este código fue alterado.',
-    cuerpo: 'Su contenido no coincide con lo que el sitio emitió. No se abrió ninguna conexión y no se aprobó nada.',
+  E_DOMINIO: {
+    titulo: 'El sitio no es quien dice ser.',
+    cuerpo: 'La petición declara un dominio distinto del que la sirvió. No se aprobó nada.',
   },
-  E_EXPIRADO: {
+  E_NO_EXISTE: {
+    titulo: 'Esta petición ya no existe.',
+    cuerpo: 'El sitio no la reconoce. Puede que la hayan cancelado o que el código sea de otro sitio.',
+  },
+  E_USADA: {
+    titulo: 'Esta petición ya se usó.',
+    cuerpo: 'Cada código sirve una sola vez. Si no fuiste tú quien la usó, avisa al sitio.',
+  },
+  E_EXPIRADA: {
     titulo: 'Este código ya caducó.',
     cuerpo: 'Los códigos duran poco a propósito. Recarga la página del sitio para que genere uno nuevo.',
+  },
+  E_RED: {
+    titulo: 'No se pudo hablar con el sitio.',
+    cuerpo: 'Comprueba tu conexión e inténtalo otra vez. No se aprobó nada.',
   },
   E_FORMATO: {
     titulo: 'Este código no es de Sello.',
@@ -30,7 +42,7 @@ const TEXTOS: Record<string, { titulo: string; cuerpo: string }> = {
 };
 
 export default function NoVerificado({ navigation, route }: Props) {
-  const { motivo, kidDeclarado, detalle } = route.params;
+  const { motivo, detalle } = route.params;
   const t = TEXTOS[motivo] ?? TEXTOS.E_FORMATO;
 
   return (
@@ -46,23 +58,12 @@ export default function NoVerificado({ navigation, route }: Props) {
         <H2 style={{ marginTop: 20 }}>{t.titulo}</H2>
         <Cuerpo style={{ marginTop: 12, marginBottom: 20 }}>{t.cuerpo}</Cuerpo>
 
-        {/* El detalle que dio el módulo, cuando aporta algo que el texto
-            general no dice. Sin esto, causas muy distintas se ven iguales. */}
+        {/* El detalle concreto, cuando añade algo que el texto general no dice.
+            Sin esto, causas muy distintas se ven iguales. */}
         {detalle && !t.cuerpo.includes(detalle) ? (
           <View style={s.detalle}>
             <Text style={[tipo.mono, { color: color.grafito, lineHeight: 18 }]}>{detalle}</Text>
           </View>
-        ) : null}
-
-        {kidDeclarado ? (
-          <Tarjeta>
-            <Fila etiqueta="Navegador" primera>
-              <Mono>{kidDeclarado.slice(0, 4)}··{kidDeclarado.slice(-4)}</Mono>
-            </Fila>
-            <Fila etiqueta="Vinculado">
-              <Text style={[tipo.dato, { color: color.carmin }]}>No aparece</Text>
-            </Fila>
-          </Tarjeta>
         ) : null}
       </View>
 
