@@ -5,8 +5,8 @@ import Pantalla from '../components/Pantalla';
 import { Boton, Ceja, Cuerpo, Fila, Minima, Origen, Pildora, Tarjeta } from '../components/ui';
 import { Cerrar, Check } from '../components/Iconos';
 import { color, espacio, radio, tipo } from '../theme';
-import { aprobar, rechazar, retoDe, PeticionInvalida } from '../services/peticion';
-import { BiometriaCancelada, ClaveInvalidada } from '../native/Signing';
+import { contextoDe, pruebaDePosesion, rechazar, responder, PeticionInvalida } from '../services/peticion';
+import { BiometriaCancelada, ClaveInvalidada, Signing } from '../native/Signing';
 import { anotar } from '../services/actividad';
 import { retoLegible } from '../lib/b64';
 import { Rutas } from '../navigation/tipos';
@@ -42,10 +42,24 @@ export default function Aprobacion({ navigation, route }: Props) {
   const confirmar = async () => {
     setOcupado(true);
     try {
-      const { firmaDerB64, keyId } = await aprobar(peticion);
+      // §7 y §9 — la prueba de posesión se firma en el chip y se envía junto
+      // con la identidad de la app. Sin ella, el dominio no puede saber que
+      // esta clave pública la controla quien la presenta.
+      const { proof, app_id } = await pruebaDePosesion(peticion, peticion.purpose);
+      const identidad = await Signing.identidad();
+
+      await responder(peticion, {
+        type: 'APP_IDENTITY',
+        version: 1,
+        app_id,
+        app_public_key: identidad.clavePublicaSpkiB64,
+        app_encryption_key: identidad.clavePublicaCifradoSpkiB64,
+        proof_of_possession: proof,
+      });
+
       resuelto.current = true;
-      await anotar({ origen: peticion.domain, accion: peticion.action, resultado: 'aprobado' });
-      navigation.replace('Firmado', { firmaDerB64, keyId, origen: peticion.domain });
+      await anotar({ origen: peticion.domain, accion: peticion.action_texto, resultado: 'aprobado' });
+      navigation.replace('Firmado', { firmaDerB64: proof, keyId: app_id, origen: peticion.domain });
     } catch (e: any) {
       if (e instanceof BiometriaCancelada) return; // puede reintentar
       if (e instanceof ClaveInvalidada) {
@@ -72,7 +86,7 @@ export default function Aprobacion({ navigation, route }: Props) {
   const denegar = async () => {
     resuelto.current = true;
     await rechazar(peticion);
-    await anotar({ origen: peticion.domain, accion: peticion.action, resultado: 'rechazado' });
+    await anotar({ origen: peticion.domain, accion: peticion.action_texto, resultado: 'rechazado' });
     navigation.navigate('Inicio');
   };
 
@@ -89,12 +103,15 @@ export default function Aprobacion({ navigation, route }: Props) {
         <Ceja style={{ marginBottom: 10 }}>Solicita tu aprobación</Ceja>
         <Origen style={{ marginBottom: 6 }}>{peticion.domain}</Origen>
         <Cuerpo style={{ marginBottom: 22 }}>
-          {peticion.action}
+          {peticion.action_texto}
           {peticion.account ? ` como ${peticion.account}.` : '.'}
         </Cuerpo>
 
         <Tarjeta style={{ marginBottom: 14 }}>
           <Fila etiqueta="Confirmado por" primera>{peticion.domain}</Fila>
+          <Fila etiqueta="Identidad del sitio">
+            <Text style={tipo.mono}>{peticion.domain_id.slice(0, 8)}··{peticion.domain_id.slice(-4)}</Text>
+          </Fila>
           <Fila etiqueta="Caduca en">
             <Text style={[tipo.mono, restante <= 30 && { color: color.carmin }]}>{reloj}</Text>
           </Fila>
@@ -123,7 +140,7 @@ export default function Aprobacion({ navigation, route }: Props) {
           <>
             <View style={s.reto}>
               <Text style={[tipo.mono, { color: color.grafito, lineHeight: 20 }]}>
-                {retoLegible(retoDe(peticion))}
+                {retoLegible(contextoDe(peticion, peticion.purpose))}
               </Text>
             </View>
             <Minima style={{ marginTop: 10 }}>
