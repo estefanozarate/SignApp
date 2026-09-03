@@ -1,114 +1,162 @@
 #!/usr/bin/env node
 /**
- * Buzón de respuestas. Sin dependencias: solo node:http.
+ * Servidor de peticiones de un dominio. Sin dependencias: solo node:http.
  *
- * El teléfono deja aquí su respuesta y el navegador la recoge. Nada más.
+ * Tres cosas:
+ *   POST /peticion              el sitio crea una petición y recibe su URL
+ *   GET  /verificar/:id         la app pregunta qué pide realmente el dominio
+ *   POST /respuesta/:id         la app entrega su respuesta; el sitio la recoge
  *
- * Antes esto era un relay de WebRTC con signaling, SDP y candidatos ICE.
- * Se quitó porque no aportaba: lo que viaja es una FIRMA, y su valor está en
- * la criptografía, no en el canal. Este servidor no puede falsificarla ni
- * reutilizarla —cubre un reto de un solo uso— ni hay nada confidencial que
- * ocultar, porque una clave pública no es un secreto. El P2P costaba NAT,
- * STUN, TURN y fallos intermitentes a cambio de una garantía que no hacía
- * falta.
+ * La verificación por HTTPS es el ancla de confianza. El QR no va firmado a
+ * propósito: si la app va a consultar /verificar de todos modos, una firma en
+ * el QR solo adelanta el rechazo unos milisegundos y a cambio obliga a
+ * gestionar, distribuir y rotar una clave de emisor. La autenticidad la da el
+ * certificado TLS del dominio, que el sistema ya valida.
  *
- *   node servidor.mjs
+ * Consecuencia asumida: la app necesita red para verificar. No pierde nada
+ * práctico, porque igual necesita red para recibir el secreto.
  */
 import { createServer } from 'node:http';
+import { randomBytes } from 'node:crypto';
 
 const PUERTO = Number(process.env.PORT ?? 8787);
 const HOST = process.env.HOST ?? '127.0.0.1';
-const VIDA_MS = 5 * 60000;       // lo que dura un QR, con holgura
-const ESPERA_MS = 25000;         // tope de una espera larga
-const MAX_CUERPO = 16 * 1024;
+const ESPERA_MS = 25000;
+const MAX_CUERPO = 64 * 1024;
+const LIMPIEZA_MS = 60000;
 
-/** session_id → { respuesta, esperando[], temporizador } */
-const buzones = new Map();
+/**
+ * request_id → petición.
+ *
+ * `consumida` no se borra al usarse: se marca. Borrarla haría que un reintento
+ * pareciera "nunca existió" en vez de "ya se usó", y son cosas distintas —
+ * la segunda es un aviso de replay que el sitio debería poder ver.
+ */
+const peticiones = new Map();
 
-const valido = (sid) => typeof sid === 'string' && /^[0-9a-f]{32}$/i.test(sid);
-
-function buzon(sid) {
-  let b = buzones.get(sid);
-  if (!b) {
-    b = { respuesta: null, esperando: [], temporizador: null };
-    b.temporizador = setTimeout(() => {
-      for (const res of b.esperando) responder(res, 204);
-      buzones.delete(sid);
-      log(sid, 'caducado');
-    }, VIDA_MS);
-    buzones.set(sid, b);
-  }
-  return b;
-}
+const idValido = (v) => typeof v === 'string' && /^[0-9a-f]{32}$/i.test(v);
 
 function responder(res, codigo, cuerpo) {
   res.writeHead(codigo, {
-    'Content-Type': 'application/json',
-    // El navegador sirve desde otro puerto; sin esto no puede leer nada.
+    'Content-Type': 'application/json; charset=utf-8',
+    // El sitio y este servidor pueden estar en orígenes distintos.
     'Access-Control-Allow-Origin': '*',
     'Access-Control-Allow-Headers': 'Content-Type',
     'Access-Control-Allow-Methods': 'GET,POST,OPTIONS',
+    'Cache-Control': 'no-store',
   });
   res.end(cuerpo ? JSON.stringify(cuerpo) : '');
 }
 
-const servidor = createServer((req, res) => {
-  const url = new URL(req.url, 'http://x');
-  const sid = url.searchParams.get('session_id');
-
-  if (req.method === 'OPTIONS') return responder(res, 204);
-  if (url.pathname !== '/respuesta') return responder(res, 404, { error: 'ruta desconocida' });
-
-  // El session_id es la única credencial: sin backend no hay token. Se exige
-  // que parezca uno de verdad para que nadie entre probando "1".
-  if (!valido(sid)) return responder(res, 400, { error: 'session_id inválido' });
-
-  // ── el teléfono deja la respuesta ─────────────────────────────────
-  if (req.method === 'POST') {
-    let cuerpo = '';
+function leerCuerpo(req) {
+  return new Promise((ok, falla) => {
+    let datos = '';
     req.on('data', (c) => {
-      cuerpo += c;
-      if (cuerpo.length > MAX_CUERPO) { req.destroy(); }
+      datos += c;
+      if (datos.length > MAX_CUERPO) { req.destroy(); falla(new Error('cuerpo demasiado grande')); }
     });
     req.on('end', () => {
-      let m;
-      try { m = JSON.parse(cuerpo); } catch { return responder(res, 400, { error: 'json inválido' }); }
-
-      const b = buzon(sid);
-      if (b.respuesta) return responder(res, 409, { error: 'ya respondido' });
-
-      b.respuesta = m;
-      log(sid, `respuesta ${m.type ?? '?'} (${cuerpo.length}B)`);
-      // Se despierta a quien estuviera esperando.
-      for (const espera of b.esperando) responder(espera, 200, m);
-      b.esperando = [];
-      responder(res, 200, { ok: true });
+      try { ok(datos ? JSON.parse(datos) : {}); } catch { falla(new Error('json inválido')); }
     });
-    return;
+  });
+}
+
+const ahora = () => Math.floor(Date.now() / 1000);
+
+const servidor = createServer(async (req, res) => {
+  const url = new URL(req.url, `http://${req.headers.host ?? 'x'}`);
+  const partes = url.pathname.split('/').filter(Boolean);
+
+  if (req.method === 'OPTIONS') return responder(res, 204);
+
+  // ── el sitio crea una petición ───────────────────────────────────
+  if (req.method === 'POST' && url.pathname === '/peticion') {
+    let cuerpo;
+    try { cuerpo = await leerCuerpo(req); } catch (e) { return responder(res, 400, { error: e.message }); }
+
+    const id = randomBytes(16).toString('hex');
+    const ttl = Math.min(Number(cuerpo.ttl) || 120, 600);
+    const peticion = {
+      request_id: id,
+      // El dominio lo fija el servidor, no el cliente: si lo pusiera quien
+      // llama, cualquiera podría emitir peticiones a nombre de otro.
+      domain: process.env.DOMINIO ?? `${HOST}:${PUERTO}`,
+      action: String(cuerpo.action ?? 'Aprobar una acción').slice(0, 120),
+      account: cuerpo.account ? String(cuerpo.account).slice(0, 120) : undefined,
+      nonce: randomBytes(32).toString('base64'),
+      issued_at: ahora(),
+      expires_at: ahora() + ttl,
+    };
+
+    peticiones.set(id, { ...peticion, consumida: false, respuesta: null, esperando: [] });
+    return responder(res, 201, {
+      request_id: id,
+      // Lo que va dentro del QR. La app saca el dominio de esta misma URL,
+      // así que no puede haber discrepancia entre lo que dice y dónde pregunta.
+      url: `${process.env.BASE ?? `http://${HOST}:${PUERTO}`}/verificar/${id}`,
+      expires_at: peticion.expires_at,
+    });
   }
 
-  // ── el navegador la recoge ─────────────────────────────────────
-  if (req.method === 'GET') {
-    const b = buzon(sid);
-    if (b.respuesta) return responder(res, 200, b.respuesta);
+  // ── la app verifica qué pide el dominio ─────────────────────────────
+  if (req.method === 'GET' && partes[0] === 'verificar' && idValido(partes[1])) {
+    const p = peticiones.get(partes[1]);
+    if (!p) return responder(res, 404, { error: 'no existe' });
+    if (p.expires_at < ahora()) return responder(res, 410, { error: 'caducada' });
+    if (p.consumida) return responder(res, 409, { error: 'ya usada' });
 
-    // Espera larga: se deja la petición abierta hasta que llegue algo. Evita
-    // preguntar en bucle sin dejar de ser HTTP corriente.
-    b.esperando.push(res);
+    const { consumida, respuesta, esperando, ...publica } = p;
+    return responder(res, 200, publica);
+  }
+
+  // ── la app responde ───────────────────────────────────────────
+  if (req.method === 'POST' && partes[0] === 'respuesta' && idValido(partes[1])) {
+    const p = peticiones.get(partes[1]);
+    if (!p) return responder(res, 404, { error: 'no existe' });
+    if (p.expires_at < ahora()) return responder(res, 410, { error: 'caducada' });
+    if (p.consumida) return responder(res, 409, { error: 'ya usada' });
+
+    let cuerpo;
+    try { cuerpo = await leerCuerpo(req); } catch (e) { return responder(res, 400, { error: e.message }); }
+
+    p.consumida = true;
+    p.respuesta = cuerpo;
+    log(partes[1], `respuesta ${cuerpo.type ?? '?'}`);
+    for (const espera of p.esperando) responder(espera, 200, cuerpo);
+    p.esperando = [];
+    return responder(res, 200, { ok: true });
+  }
+
+  // ── el sitio recoge la respuesta ─────────────────────────────────
+  if (req.method === 'GET' && partes[0] === 'respuesta' && idValido(partes[1])) {
+    const p = peticiones.get(partes[1]);
+    if (!p) return responder(res, 404, { error: 'no existe' });
+    if (p.respuesta) return responder(res, 200, p.respuesta);
+    if (p.expires_at < ahora()) return responder(res, 410, { error: 'caducada' });
+
+    // Espera larga: la petición queda abierta hasta que llegue algo.
+    p.esperando.push(res);
     const corte = setTimeout(() => {
-      b.esperando = b.esperando.filter((r) => r !== res);
+      p.esperando = p.esperando.filter((r) => r !== res);
       responder(res, 204);
     }, ESPERA_MS);
     res.on('close', () => clearTimeout(corte));
     return;
   }
 
-  responder(res, 405, { error: 'método no admitido' });
+  responder(res, 404, { error: 'ruta desconocida' });
 });
 
-const log = (sid, msg) => console.log(`[${sid.slice(0, 8)}…] ${msg}`);
+// Las peticiones caducadas se retiran con retraso, para que un reintento
+// tardío reciba 410 (caducada) y no 404 (no existe): dice más.
+setInterval(() => {
+  const limite = ahora() - 300;
+  for (const [id, p] of peticiones) if (p.expires_at < limite) peticiones.delete(id);
+}, LIMPIEZA_MS).unref();
+
+const log = (id, msg) => console.log(`[${id.slice(0, 8)}…] ${msg}`);
 
 servidor.listen(PUERTO, HOST, () => {
-  console.log(`Buzón de respuestas en http://${HOST}:${PUERTO}`);
+  console.log(`Servidor de peticiones en http://${HOST}:${PUERTO}`);
   console.log('Para que el teléfono llegue hasta aquí:  adb reverse tcp:8787 tcp:8787');
 });
