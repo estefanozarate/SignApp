@@ -1,12 +1,11 @@
-import { ResultadoQr } from '../native/Cose';
+import { Peticion } from '../services/peticion';
 
 export type Rutas = {
   Bienvenida: undefined;
   Inicio: undefined;
   Escaner: undefined;
-  NoVerificado: { motivo: string; kidDeclarado?: string; detalle?: string };
-  Vincular: { qr: ResultadoQr };
-  Aprobacion: { qr: ResultadoQr };
+  NoVerificado: { motivo: string; detalle?: string };
+  Aprobacion: { peticion: Peticion };
   Firmado: { firmaDerB64: string; keyId: string; origen: string };
   Dispositivo: undefined;
 };

@@ -12,8 +12,7 @@ import { Boton, Cuerpo } from '../components/ui';
 import { Atras, Check } from '../components/Iconos';
 import { RETICULA } from '../lib/guilloche';
 import { color, espacio, tipo } from '../theme';
-import { Cose } from '../native/Cose';
-import { vinculos } from '../services/vinculos';
+import { PeticionInvalida, verificar } from '../services/peticion';
 import { Rutas } from '../navigation/tipos';
 
 type Props = NativeStackScreenProps<Rutas, 'Escaner'>;
@@ -24,16 +23,19 @@ type Paso = 'firma' | 'vigencia' | 'sesion';
 type Permiso = 'pidiendo' | 'concedido' | 'denegado' | 'bloqueado';
 
 const PASOS: { id: Paso; texto: string }[] = [
-  { id: 'firma', texto: 'Autenticidad del código' },
-  { id: 'vigencia', texto: 'Vigencia del código' },
-  { id: 'sesion', texto: 'Navegador vinculado' },
+  { id: 'firma', texto: 'Dirección segura' },
+  { id: 'vigencia', texto: 'El sitio confirma la petición' },
+  { id: 'sesion', texto: 'Petición vigente y sin usar' },
 ];
 
 const DONDE_FALLA: Record<string, Paso> = {
   E_FORMATO: 'firma',
-  E_NO_VINCULADO: 'firma',
-  E_FIRMA: 'firma',
-  E_EXPIRADO: 'vigencia',
+  E_INSEGURO: 'firma',
+  E_RED: 'vigencia',
+  E_DOMINIO: 'vigencia',
+  E_NO_EXISTE: 'vigencia',
+  E_EXPIRADA: 'sesion',
+  E_USADA: 'sesion',
 };
 
 /**
@@ -71,28 +73,26 @@ export default function Escaner({ navigation }: Props) {
     if (procesando.current) return;
     procesando.current = true;
     setDetectado(true);
-    setPie('Código detectado. Comprobando que sea auténtico…');
 
     try {
-      const qr = await Cose.verificarQr(payload, await vinculos());
-      // Si la verificación pasó, los tres pasos son ciertos a la vez.
+      // El primer paso es local: comprobar que la dirección es segura antes
+      // de mandar nada a ningún sitio.
+      setPie('Código detectado. Comprobando la dirección…');
+      setHechos(['firma']);
+
+      setPie('Preguntando al sitio qué está pidiendo…');
+      const peticion = await verificar(payload);
+
       setHechos(['firma', 'vigencia', 'sesion']);
-      setPie(`Abriendo conexión con ${qr.origen}…`);
-      navigation.replace(qr.tipo === 'pair' ? 'Vincular' : 'Aprobacion', { qr });
+      navigation.replace('Aprobacion', { peticion });
     } catch (e: any) {
-      const codigo: string = e?.code ?? 'E_FORMATO';
+      const codigo: string = e instanceof PeticionInvalida ? e.codigo : (e?.code ?? 'E_FORMATO');
       const paso = DONDE_FALLA[codigo] ?? 'firma';
       setFallo(paso);
-      setHechos(paso === 'vigencia' ? ['firma'] : []);
-      setPie(mensajeDe(codigo));
+      setHechos(paso === 'firma' ? [] : paso === 'vigencia' ? ['firma'] : ['firma', 'vigencia']);
+      setPie(e?.message ?? 'No se pudo comprobar este código.');
       setTimeout(
-        () => navigation.replace('NoVerificado', {
-          motivo: codigo,
-          kidDeclarado: e?.userInfo?.kid,
-          // El módulo nativo distingue causas que el código de error agrupa.
-          // Tirar ese mensaje deja al usuario —y a quien depura— a ciegas.
-          detalle: e?.message,
-        }),
+        () => navigation.replace('NoVerificado', { motivo: codigo, detalle: e?.message }),
         900,
       );
     }
@@ -150,8 +150,6 @@ export default function Escaner({ navigation }: Props) {
         <Rosette anillos={RETICULA} tamano={290} escala={detectado ? 0.74 : 1} />
       </View>
 
-      {/* Capa de UI transparente. Antes era otro <Pantalla>, cuya raíz opaca
-          tapaba la cámara y la retícula. */}
       <SafeAreaView style={s.capa} edges={['top', 'bottom']} pointerEvents="box-none">
         <View style={s.cabecera}>
           <Pressable onPress={() => navigation.goBack()} style={s.iconbtn} accessibilityLabel="Volver">
@@ -181,15 +179,6 @@ export default function Escaner({ navigation }: Props) {
       </SafeAreaView>
     </Pantalla>
   );
-}
-
-function mensajeDe(codigo: string) {
-  switch (codigo) {
-    case 'E_NO_VINCULADO': return 'Este navegador no está vinculado a tu teléfono.';
-    case 'E_FIRMA': return 'Este código fue alterado.';
-    case 'E_EXPIRADO': return 'Este código ya caducó. Pide uno nuevo en el sitio.';
-    default: return 'Este código no tiene el formato de Sello.';
-  }
 }
 
 const lleno = { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0 } as const;
