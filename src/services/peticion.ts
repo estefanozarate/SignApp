@@ -89,11 +89,20 @@ export async function verificar(textoQr: string): Promise<Peticion> {
   const qr = leerQr(textoQr);
   const origen = baseDe(qr.domain);
 
-  const res = await conTope(
-    fetch(`${origen}/verificar/${qr.request_id}`, { headers: { Accept: 'application/json' } }),
-    TIEMPO_LIMITE_MS,
-    'El sitio no respondió a tiempo.',
-  );
+  // fetch lanza TypeError si no hay ruta al servidor. Sin envolverlo, ese
+  // fallo llegaba arriba sin código y se clasificaba como E_FORMATO: la app
+  // decía "este código no es de Sello" cuando el problema era la red.
+  let res: Response;
+  try {
+    res = await conTope(
+      fetch(`${origen}/verificar/${qr.request_id}`, { headers: { Accept: 'application/json' } }),
+      TIEMPO_LIMITE_MS,
+      'El sitio no respondió a tiempo.',
+    );
+  } catch (e) {
+    if (e instanceof PeticionInvalida) throw e;
+    throw new PeticionInvalida('E_RED', `No se pudo conectar con ${qr.domain}.`);
+  }
 
   if (res.status === 404) throw new PeticionInvalida('E_NO_EXISTE', 'El sitio no reconoce esta petición.');
   if (res.status === 410) throw new PeticionInvalida('E_EXPIRADA', 'Este código ya caducó.');
@@ -101,7 +110,12 @@ export async function verificar(textoQr: string): Promise<Peticion> {
   if (res.status === 403) throw new PeticionInvalida('E_NO_AUTORIZADA', 'El sitio no autorizó esta petición.');
   if (!res.ok) throw new PeticionInvalida('E_RED', `El sitio respondió ${res.status}.`);
 
-  const r = await res.json();
+  let r: any;
+  try {
+    r = await res.json();
+  } catch {
+    throw new PeticionInvalida('E_RED', 'El sitio respondió algo que no se pudo leer.');
+  }
 
   // §6 — las tres comparaciones. Sin ellas, el dominio podría responder
   // cualquier cosa y la app se la creería.
@@ -172,15 +186,27 @@ export async function pruebaDePosesion(p: Peticion, contexto: string) {
 
 /** Entrega la respuesta al dominio, con el contexto de esta petición (§15). */
 export async function responder(p: Peticion, cuerpo: Record<string, unknown>) {
-  const res = await conTope(
-    fetch(`${p.origen}/respuesta/${p.request_id}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ ...cuerpo, request_id: p.request_id, nonce: p.nonce }),
-    }),
-    TIEMPO_LIMITE_MS,
-    'El sitio no respondió a tiempo.',
-  );
+  let res: Response;
+  try {
+    res = await conTope(
+      fetch(`${p.origen}/respuesta/${p.request_id}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ...cuerpo, request_id: p.request_id, nonce: p.nonce }),
+      }),
+      TIEMPO_LIMITE_MS,
+      'El sitio no respondió a tiempo.',
+    );
+  } catch (e) {
+    if (e instanceof PeticionInvalida) throw e;
+    throw new PeticionInvalida('E_RED', `No se pudo conectar con ${p.domain}.`);
+  }
+
+  // §9: el dominio rechaza la prueba si no cuadra. Merece su propio motivo:
+  // significa que la firma no se pudo validar, no que haya fallado la red.
+  if (res.status === 403) {
+    throw new PeticionInvalida('E_PRUEBA', 'El sitio no aceptó la prueba de identidad.');
+  }
   if (res.status === 409) throw new PeticionInvalida('E_USADA', 'El sitio ya recibió una respuesta.');
   if (res.status === 410) throw new PeticionInvalida('E_EXPIRADA', 'La petición caducó antes de enviarla.');
   if (!res.ok) throw new PeticionInvalida('E_RED', `El sitio no aceptó la respuesta (${res.status}).`);
