@@ -10,6 +10,11 @@ android/app/release/
 *.jks
 !debug.keystore
 
+# La clave privada del dominio. Si esto se filtra, cualquiera puede hacerse
+# pasar por el dominio ante las apps que ya emparejaron.
+server/datos/
+*.pem
+
 # macOS
 .DS_Store
 
