@@ -42,15 +42,14 @@
   <p class="ceja">Demo del lado navegador</p>
   <h1>Sello</h1>
   <p>
-    Esta página tiene su propio par de claves en IndexedDB. Vincula tu teléfono una vez
-    y después podrá aprobar acciones con el chip. Lo único que vuelve es un comprobante
-    que esta página verifica: nada secreto viaja.
+    El dominio emite una petición, tu teléfono la verifica contra el propio dominio por
+    HTTPS y responde con su identidad y una prueba de posesión de su clave privada.
   </p>
 
   <div class="tarjeta">
     <dl>
-      <div class="fila"><dt>Huella de este navegador</dt><dd class="mono" id="kid">…</dd></div>
-      <div class="fila"><dt>Teléfono vinculado</dt><dd id="estadoTel"><span class="pill esp">Ninguno</span></dd></div>
+      <div class="fila"><dt>Identidad del dominio</dt><dd class="mono" id="dominio">…</dd></div>
+      <div class="fila"><dt>App emparejada</dt><dd id="estadoTel"><span class="pill esp">Ninguna</span></dd></div>
       <div class="fila"><dt>Estado</dt><dd id="estadoCanal"><span class="pill esp">Inactivo</span></dd></div>
     </dl>
   </div>
@@ -62,70 +61,52 @@
 
   <div class="tarjeta" id="resultado" hidden></div>
 
-  <button id="btnEntrar">Iniciar sesión con el teléfono</button>
-  <button id="btnOlvidar" class="ghost">Desvincular el teléfono</button>
+  <button id="btnEntrar">Emparejar un teléfono</button>
+  <button id="btnOlvidar" class="ghost">Olvidar el emparejamiento</button>
 </main>
 
 <script type="module">
-import { identidadNavegador, qrVinculacion, qrAprobacion, verificarFirma } from './sello.js';
 import qrcode from './vendor-qrcode.js';
 
-// Loopback a propósito: el navegador llega por localhost y el teléfono
-// también, gracias a `adb reverse tcp:8787 tcp:8787`. La app solo acepta
-// https:// o http:// en 127.0.0.1, donde no hay red que espiar.
-// En producción esto sería un https:// de verdad.
-const SERVIDOR = 'http://127.0.0.1:8787';
-const ORIGEN = location.hostname || 'localhost';
+/**
+ * Lado navegador — §4, §9 y §24 de diseno_app.md.
+ *
+ * El dominio (server/servidor.mjs) es quien emite las peticiones y guarda su
+ * clave privada. Esta página solo las pide y muestra el QR: no tiene ninguna
+ * clave propia, porque una página estática no puede guardar un secreto.
+ */
+const DOMINIO = 'http://127.0.0.1:8787';
 
 const $ = (id) => document.getElementById(id);
-const pill = (clase, texto) => `<span class="pill ${clase}">${texto}</span>`;
+const pill = (c, t) => `<span class="pill ${c}">${t}</span>`;
+const estado = (c, t) => { $('estadoCanal').innerHTML = pill(c, t); };
 
-const ident = await identidadNavegador();
-$('kid').textContent = ident.kid.replace(/(.{4})/g, '$1 ').trim();
-
-// El teléfono vinculado se guarda igual que en la app: clave pública, no secreto.
-const leerTel = () => JSON.parse(localStorage.getItem('sello.telefono') || 'null');
-const pintarTel = () => {
-  const t = leerTel();
-  $('estadoTel').innerHTML = t ? pill('ok', t.key_id.slice(0, 8) + '··') : pill('esp', 'Ninguno');
-  // Un solo botón: la primera vez vincula, después aprueba. El usuario no
-  // tiene por qué saber que son dos operaciones distintas.
-  $('btnEntrar').textContent = t ? 'Iniciar sesión con el teléfono' : 'Vincular tu teléfono';
-  $('btnOlvidar').style.display = t ? '' : 'none';
-};
-pintarTel();
+const leerApp = () => JSON.parse(localStorage.getItem('sello.app') || 'null');
+function pintar() {
+  const a = leerApp();
+  $('estadoTel').innerHTML = a ? pill('ok', a.app_id.slice(0, 8) + '··') : pill('esp', 'Ninguna');
+  $('btnEntrar').textContent = a ? 'Pedir el secreto al teléfono' : 'Emparejar un teléfono';
+  $('btnOlvidar').style.display = a ? '' : 'none';
+}
+pintar();
 
 function mostrarQr(payload, pie) {
   $('cajaQr').classList.remove('oculto');
   $('pieQr').textContent = pie;
-
-  const qr = qrcode(0, 'M');   // 0 = la versión más pequeña que quepa
+  const qr = qrcode(0, 'M');
   qr.addData(payload, 'Byte');
   qr.make();
-
-  const n = qr.getModuleCount();
-  const margen = 4;            // zona de silencio que exige la norma
+  const n = qr.getModuleCount(), margen = 4;
   const escala = Math.max(2, Math.floor(340 / (n + margen * 2)));
   const lado = (n + margen * 2) * escala;
-
   const c = $('qr');
   c.width = c.height = lado;
   c.style.width = c.style.height = lado + 'px';
   const ctx = c.getContext('2d');
-  ctx.fillStyle = '#fff';
-  ctx.fillRect(0, 0, lado, lado);
+  ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, lado, lado);
   ctx.fillStyle = '#101821';
-  for (let y = 0; y < n; y++) {
-    for (let x = 0; x < n; x++) {
-      if (qr.isDark(y, x)) {
-        ctx.fillRect((x + margen) * escala, (y + margen) * escala, escala, escala);
-      }
-    }
-  }
-}
-
-function estadoCanal(clase, texto) {
-  $('estadoCanal').innerHTML = pill(clase, texto);
+  for (let y = 0; y < n; y++) for (let x = 0; x < n; x++)
+    if (qr.isDark(y, x)) ctx.fillRect((x + margen) * escala, (y + margen) * escala, escala, escala);
 }
 
 function contar(hasta, alExpirar) {
@@ -137,98 +118,93 @@ function contar(hasta, alExpirar) {
   return () => clearInterval(t);
 }
 
-/**
- * Espera la respuesta del teléfono.
- *
- * Es una espera larga por HTTP: la petición queda abierta hasta que llega
- * algo o vence, y se reintenta. Sin WebRTC, sin WebSocket, sin sondeo en
- * bucle. Lo que vuelve es un comprobante, y se verifica con criptografía —
- * el servidor no puede falsificarlo.
- */
-async function esperarRespuesta(sessionId, hasta) {
-  const url = `${SERVIDOR}/respuesta?session_id=${encodeURIComponent(sessionId)}`;
-  estadoCanal('esp', 'Esperando al teléfono');
-
+/** Espera larga: la petición queda abierta hasta que el teléfono responde. */
+async function esperar(requestId, hasta) {
+  estado('esp', 'Esperando al teléfono');
   while (Date.now() / 1000 < hasta) {
     try {
-      const r = await fetch(url);
-      if (r.status === 200) {
-        estadoCanal('ok', 'Respuesta recibida');
-        return r.json();
-      }
-      // 204 = venció la espera sin novedad; se vuelve a preguntar.
+      const r = await fetch(`${DOMINIO}/respuesta/${requestId}`);
+      if (r.status === 200) { estado('ok', 'Respuesta recibida'); return r.json(); }
+      if (r.status === 410) break;
     } catch {
-      // Se cayó la red o el servidor; se reintenta hasta que caduque el QR.
       await new Promise(res => setTimeout(res, 1000));
     }
   }
-  estadoCanal('esp', 'Inactivo');
+  estado('esp', 'Inactivo');
   return null;
 }
 
-async function vincularTelefono() {
-  const ttl = 300;
-  const hasta = Math.floor(Date.now() / 1000) + ttl;
-  const { payload, sessionId } = await qrVinculacion({ origen: ORIGEN, signaling: SERVIDOR, ttl });
-  mostrarQr(payload, 'Escanéalo con Sello');
-  const parar = contar(hasta, () => {});
+async function operar(purpose, accion) {
+  const c = await (await fetch(`${DOMINIO}/peticion`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ purpose, action: accion, ttl: 180 }),
+  })).json();
 
-  const r = await esperarRespuesta(sessionId, hasta);
+  mostrarQr(c.qr, 'Escanéalo con Sello');
+  const parar = contar(c.expires_at, () => {});
+  const r = await esperar(c.request_id, c.expires_at);
   parar();
   $('cajaQr').classList.add('oculto');
   $('resultado').hidden = false;
 
-  if (!r || r.type !== 'paired') {
-    $('resultado').innerHTML = pill('mal', r ? 'Rechazado' : 'El código caducó');
-    return;
-  }
-  // Guardamos la PÚBLICA del teléfono: con ella verificaremos sus comprobantes.
-  localStorage.setItem('sello.telefono', JSON.stringify(r));
-  pintarTel();
-  $('resultado').innerHTML = `${pill('ok', 'Teléfono vinculado')}
-    <p class="mono" style="margin-top:12px">${r.device} · ${r.key_id}</p>`;
+  if (!r) { $('resultado').innerHTML = pill('mal', 'El código caducó'); return null; }
+  if (r.type === 'DENIED') { $('resultado').innerHTML = pill('mal', 'Rechazado desde el teléfono'); return null; }
+  return { peticion: c, respuesta: r };
 }
 
-async function pedirAprobacion() {
-  const tel = leerTel();
-  const ttl = 120;
-  const hasta = Math.floor(Date.now() / 1000) + ttl;
-  const { payload, sessionId, aVerificar } = await qrAprobacion({
-    origen: ORIGEN, signaling: SERVIDOR,
-    accion: 'Iniciar sesión', cuenta: 'estefano@' + ORIGEN, ttl,
-  });
-  mostrarQr(payload, 'Escanéalo con Sello');
-  const parar = contar(hasta, () => {});
+$('btnEntrar').onclick = async () => {
+  $('btnEntrar').disabled = true;
+  try {
+    const emparejada = leerApp();
+    const res = await operar(
+      emparejada ? 'SECRET_REQUEST' : 'PAIR',
+      emparejada ? 'Recuperar tu acceso' : 'Vincular este dispositivo',
+    );
+    if (!res) return;
+    const { peticion, respuesta } = res;
 
-  const r = await esperarRespuesta(sessionId, hasta);
-  parar();
-  $('cajaQr').classList.add('oculto');
-  $('resultado').hidden = false;
+    if (respuesta.type !== 'APP_IDENTITY') {
+      $('resultado').innerHTML = pill('mal', 'Respuesta inesperada');
+      return;
+    }
 
-  if (!r || r.type !== 'signature') {
-    $('resultado').innerHTML = pill('mal', r ? 'Rechazado desde el teléfono' : 'El código caducó');
-    return;
+    // §9 — el dominio verificaría aquí la prueba de posesión con la clave
+    // pública que acompaña. Esa comprobación vive en el servidor, no en esta
+    // página: una página estática no puede custodiar el registro.
+    localStorage.setItem('sello.app', JSON.stringify({
+      app_id: respuesta.app_id,
+      app_public_key: respuesta.app_public_key,
+      app_encryption_key: respuesta.app_encryption_key,
+      request_id: peticion.request_id,
+    }));
+    pintar();
+
+    $('resultado').innerHTML = `${pill('ok', 'Identidad recibida')}
+      <p class="mono" style="margin-top:12px">app_id ${respuesta.app_id}</p>
+      <p style="margin-top:8px;font-size:13px">Llegó con prueba de posesión. La
+      verificación de esa prueba es del §9 y va en la Fase 2.</p>`;
+  } finally {
+    $('btnEntrar').disabled = false;
   }
-  // El navegador no cree en el mensaje: comprueba el comprobante él mismo.
-  const valida = await verificarFirma({
-    firmaDerB64: r.signature, spkiB64: tel.public_key, aVerificar,
-  });
-  $('resultado').innerHTML = valida
-    ? `${pill('ok', 'Aprobación verificada')}
-       <p class="mono" style="margin-top:12px">comprobante ${r.signature.slice(0, 24)}…</p>
-       <p style="margin-top:8px;font-size:13px">Cubre exactamente lo que pedimos y solo pudo
-       generarlo el chip de ese teléfono.</p>`
-    : `${pill('mal', 'No es válida')}
-       <p style="margin-top:8px;font-size:13px">Llegó una respuesta, pero no la generó el
-       teléfono vinculado. Se descarta.</p>`;
-}
-
-// La primera vez hay que vincular; a partir de ahí, solo aprobar.
-$('btnEntrar').onclick = () => (leerTel() ? pedirAprobacion() : vincularTelefono());
+};
 
 $('btnOlvidar').onclick = () => {
-  localStorage.removeItem('sello.telefono');
-  pintarTel();
+  localStorage.removeItem('sello.app');
+  pintar();
   $('resultado').hidden = true;
 };
+
+// La identidad del dominio se consulta creando una petición de prueba.
+(async () => {
+  try {
+    const c = await (await fetch(`${DOMINIO}/peticion`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ purpose: 'PAIR', ttl: 1 }),
+    })).json();
+    const v = await (await fetch(`${DOMINIO}/verificar/${c.request_id}`)).json();
+    $('dominio').textContent = v.domain_id.replace(/(.{4})/g, '$1 ').trim().slice(0, 24) + '…';
+  } catch {
+    $('dominio').textContent = 'servidor apagado';
+  }
+})();
 </script>
