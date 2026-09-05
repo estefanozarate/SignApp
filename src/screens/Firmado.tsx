@@ -12,7 +12,8 @@ import { Rutas } from '../navigation/tipos';
 type Props = NativeStackScreenProps<Rutas, 'Firmado'>;
 
 export default function Firmado({ navigation, route }: Props) {
-  const { firmaDerB64, origen } = route.params;
+  const { firmaDerB64, origen, proposito } = route.params;
+  const vinculado = proposito === 'PAIR';
   const aparece = useRef(new Animated.Value(0)).current;
 
   useEffect(() => {
@@ -32,9 +33,14 @@ export default function Firmado({ navigation, route }: Props) {
         </Rosette>
 
         <Animated.View style={[s.texto, { opacity: aparece }]}>
-          <H2 style={{ marginBottom: 8 }}>Aprobado</H2>
-          <Cuerpo style={{ textAlign: 'center', maxWidth: 270, marginBottom: 18 }}>
-            Ya puedes volver a la pantalla de {origen}. Tu aprobación llegó allí.
+          {/* Vincular un dispositivo y aprobar una acción no son lo mismo:
+              lo primero crea una relación duradera, lo segundo autoriza algo
+              concreto. La pantalla debería decir cuál de las dos ocurrió. */}
+          <H2 style={{ marginBottom: 8 }}>{vinculado ? 'Dispositivo vinculado' : 'Aprobado'}</H2>
+          <Cuerpo style={{ textAlign: 'center', maxWidth: 280, marginBottom: 18 }}>
+            {vinculado
+              ? `${origen} ya reconoce este teléfono. A partir de ahora podrá pedirte aprobaciones.`
+              : `Ya puedes volver a la pantalla de ${origen}. Tu aprobación llegó allí.`}
           </Cuerpo>
           <Text style={[tipo.mono, { color: color.grafito }]}>
             comprobante {corto(firmaDerB64)}

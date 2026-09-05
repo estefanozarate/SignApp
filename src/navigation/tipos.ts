@@ -6,6 +6,6 @@ export type Rutas = {
   Escaner: undefined;
   NoVerificado: { motivo: string; detalle?: string };
   Aprobacion: { peticion: Peticion };
-  Firmado: { firmaDerB64: string; keyId: string; origen: string };
+  Firmado: { firmaDerB64: string; keyId: string; origen: string; proposito: 'PAIR' | 'SECRET_REQUEST' };
   Dispositivo: undefined;
 };
