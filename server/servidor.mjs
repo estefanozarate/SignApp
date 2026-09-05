@@ -109,10 +109,16 @@ const servidor = createServer(async (req, res) => {
       request_id: id,
       nonce: peticion.nonce,
       purpose,
-      // §4.2 — el QR lleva versión, acción, dominio, request_id y nonce.
-      // Va como URL para que la app saque el dominio de donde va a preguntar:
-      // así no puede haber discrepancia entre lo que dice y a quién consulta.
-      qr: `${process.env.BASE ?? `http://${HOST}:${PUERTO}`}/verificar/${id}`,
+      // §4.2 — el QR lleva exactamente estos campos. No lleva la URL de
+      // verificación: el §5 dice que la app no debe fiarse de una URL que le
+      // suministre el QR, así que la construye ella a partir del dominio.
+      qr: JSON.stringify({
+        version: 1,
+        action: purpose,
+        domain: peticion.domain,
+        request_id: id,
+        nonce: peticion.nonce,
+      }),
       expires_at: peticion.expires_at,
     });
   }
