@@ -23,19 +23,24 @@ type Paso = 'firma' | 'vigencia' | 'sesion';
 type Permiso = 'pidiendo' | 'concedido' | 'denegado' | 'bloqueado';
 
 const PASOS: { id: Paso; texto: string }[] = [
-  { id: 'firma', texto: 'Dirección segura' },
-  { id: 'vigencia', texto: 'El sitio confirma la petición' },
-  { id: 'sesion', texto: 'Petición vigente y sin usar' },
+  { id: 'firma', texto: 'Código bien formado' },
+  { id: 'vigencia', texto: 'El dominio autoriza la petición' },
+  { id: 'sesion', texto: 'Identidad del dominio verificada' },
 ];
 
 const DONDE_FALLA: Record<string, Paso> = {
   E_FORMATO: 'firma',
-  E_INSEGURO: 'firma',
+  E_VERSION: 'firma',
   E_RED: 'vigencia',
-  E_DOMINIO: 'vigencia',
   E_NO_EXISTE: 'vigencia',
-  E_EXPIRADA: 'sesion',
-  E_USADA: 'sesion',
+  E_NO_AUTORIZADA: 'vigencia',
+  E_EXPIRADA: 'vigencia',
+  E_USADA: 'vigencia',
+  // Los que fallan en la comparación del §6 caen en el último paso: el
+  // dominio respondió, pero lo que dijo no cuadra con el código.
+  E_DOMINIO: 'sesion',
+  E_NONCE: 'sesion',
+  E_PROPOSITO: 'sesion',
 };
 
 /**
@@ -75,12 +80,12 @@ export default function Escaner({ navigation }: Props) {
     setDetectado(true);
 
     try {
-      // El primer paso es local: comprobar que la dirección es segura antes
-      // de mandar nada a ningún sitio.
-      setPie('Código detectado. Comprobando la dirección…');
+      // El primer paso es local: comprobar la forma del código antes de
+      // mandar nada a ningún sitio.
+      setPie('Código detectado. Comprobando su forma…');
       setHechos(['firma']);
 
-      setPie('Preguntando al sitio qué está pidiendo…');
+      setPie('Preguntando al dominio si autoriza esta petición…');
       const peticion = await verificar(payload);
 
       setHechos(['firma', 'vigencia', 'sesion']);
