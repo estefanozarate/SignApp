@@ -11,13 +11,25 @@ import { Rutas } from '../navigation/tipos';
 type Props = NativeStackScreenProps<Rutas, 'NoVerificado'>;
 
 const TEXTOS: Record<string, { titulo: string; cuerpo: string }> = {
-  E_INSEGURO: {
-    titulo: 'Este código apunta a una dirección sin cifrar.',
-    cuerpo: 'Sello solo habla con sitios por conexión segura. Nadie podría garantizar que la petición viene de quien dice.',
+  E_VERSION: {
+    titulo: 'Este código es de otra versión.',
+    cuerpo: 'Actualiza Sello, o pide al sitio un código nuevo.',
   },
   E_DOMINIO: {
     titulo: 'El sitio no es quien dice ser.',
-    cuerpo: 'La petición declara un dominio distinto del que la sirvió. No se aprobó nada.',
+    cuerpo: 'Lo que respondió no coincide con lo que decía el código. No se aprobó nada.',
+  },
+  E_NONCE: {
+    titulo: 'La respuesta del sitio no cuadra.',
+    cuerpo: 'El dominio devolvió un valor distinto del que llevaba el código. Podría haber alguien interponiéndose. No se aprobó nada.',
+  },
+  E_PROPOSITO: {
+    titulo: 'El sitio cambió lo que pedía.',
+    cuerpo: 'El código pedía una cosa y el dominio respondió sobre otra. No se aprobó nada.',
+  },
+  E_NO_AUTORIZADA: {
+    titulo: 'El sitio no autorizó esta petición.',
+    cuerpo: 'Puede que la hayan cancelado. Pide un código nuevo.',
   },
   E_NO_EXISTE: {
     titulo: 'Esta petición ya no existe.',
@@ -58,13 +70,15 @@ export default function NoVerificado({ navigation, route }: Props) {
         <H2 style={{ marginTop: 20 }}>{t.titulo}</H2>
         <Cuerpo style={{ marginTop: 12, marginBottom: 20 }}>{t.cuerpo}</Cuerpo>
 
-        {/* El detalle concreto, cuando añade algo que el texto general no dice.
-            Sin esto, causas muy distintas se ven iguales. */}
-        {detalle && !t.cuerpo.includes(detalle) ? (
+        {/* El detalle concreto, cuando aporta algo que el texto general no
+            dice. Se compara contra título Y cuerpo: antes solo miraba el
+            cuerpo y el mensaje salía repetido bajo su propio título. */}
+        {detalle && !t.cuerpo.includes(detalle) && !t.titulo.includes(detalle) ? (
           <View style={s.detalle}>
             <Text style={[tipo.mono, { color: color.grafito, lineHeight: 18 }]}>{detalle}</Text>
           </View>
         ) : null}
+
       </View>
 
       <View style={s.acciones}>
