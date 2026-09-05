@@ -59,7 +59,10 @@ export default function Aprobacion({ navigation, route }: Props) {
 
       resuelto.current = true;
       await anotar({ origen: peticion.domain, accion: peticion.action_texto, resultado: 'aprobado' });
-      navigation.replace('Firmado', { firmaDerB64: proof, keyId: app_id, origen: peticion.domain });
+      navigation.replace('Firmado', {
+        firmaDerB64: proof, keyId: app_id,
+        origen: peticion.domain, proposito: peticion.purpose,
+      });
     } catch (e: any) {
       if (e instanceof BiometriaCancelada) return; // puede reintentar
       if (e instanceof ClaveInvalidada) {
@@ -100,7 +103,9 @@ export default function Aprobacion({ navigation, route }: Props) {
       </View>
 
       <ScrollView contentContainerStyle={s.cuerpo} showsVerticalScrollIndicator={false}>
-        <Ceja style={{ marginBottom: 10 }}>Solicita tu aprobación</Ceja>
+        <Ceja style={{ marginBottom: 10 }}>
+          {peticion.purpose === 'PAIR' ? 'Quiere vincularse con tu teléfono' : 'Solicita tu aprobación'}
+        </Ceja>
         <Origen style={{ marginBottom: 6 }}>{peticion.domain}</Origen>
         <Cuerpo style={{ marginBottom: 22 }}>
           {peticion.action_texto}
@@ -152,7 +157,9 @@ export default function Aprobacion({ navigation, route }: Props) {
       </ScrollView>
 
       <View style={s.acciones}>
-        <Boton onPress={confirmar} cargando={ocupado} icono={<Check />}>Aprobar</Boton>
+        <Boton onPress={confirmar} cargando={ocupado} icono={<Check />}>
+          {peticion.purpose === 'PAIR' ? 'Vincular este dispositivo' : 'Aprobar'}
+        </Boton>
         <Boton variante="peligro" onPress={denegar}>Rechazar</Boton>
       </View>
     </Pantalla>
