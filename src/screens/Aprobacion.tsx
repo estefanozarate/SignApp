@@ -5,8 +5,11 @@ import Pantalla from '../components/Pantalla';
 import { Boton, Ceja, Cuerpo, Fila, Minima, Origen, Pildora, Tarjeta } from '../components/ui';
 import { Cerrar, Check } from '../components/Iconos';
 import { color, espacio, radio, tipo } from '../theme';
-import { contextoDe, pruebaDePosesion, rechazar, responder, PeticionInvalida } from '../services/peticion';
-import { BiometriaCancelada, ClaveInvalidada, Signing } from '../native/Signing';
+import {
+  abrirSecreto, contextoDe, pruebaDePosesion, rechazar, responder, PeticionInvalida,
+} from '../services/peticion';
+import { guardar } from '../services/boveda';
+import { BiometriaCancelada, ClaveInvalidada, SecretoAlterado, Signing } from '../native/Signing';
 import { anotar } from '../services/actividad';
 import { retoLegible } from '../lib/b64';
 import { Rutas } from '../navigation/tipos';
@@ -48,7 +51,7 @@ export default function Aprobacion({ navigation, route }: Props) {
       const { proof, app_id } = await pruebaDePosesion(peticion, peticion.purpose);
       const identidad = await Signing.identidad();
 
-      await responder(peticion, {
+      const { secret } = await responder(peticion, {
         type: 'APP_IDENTITY',
         version: 1,
         app_id,
@@ -58,13 +61,37 @@ export default function Aprobacion({ navigation, route }: Props) {
       });
 
       resuelto.current = true;
+
+      // §10 — si el dominio entregó un secreto, se abre DENTRO del chip y se
+      // guarda. Pide autenticación otra vez: la firma y el descifrado son dos
+      // operaciones distintas del Keystore, cada una con su propio permiso.
+      let secretoRecibido = false;
+      if (secret) {
+        const claro = await abrirSecreto(secret, peticion);
+        await guardar({
+          domain: peticion.domain,
+          domain_id: peticion.domain_id,
+          secreto: claro,
+        });
+        secretoRecibido = true;
+      }
+
       await anotar({ origen: peticion.domain, accion: peticion.action_texto, resultado: 'aprobado' });
       navigation.replace('Firmado', {
         firmaDerB64: proof, keyId: app_id,
         origen: peticion.domain, proposito: peticion.purpose,
+        secretoRecibido,
       });
     } catch (e: any) {
       if (e instanceof BiometriaCancelada) return; // puede reintentar
+      if (e instanceof SecretoAlterado) {
+        // El tag de GCM no cuadró: el dato llegó alterado. No se guarda nada.
+        navigation.replace('NoVerificado', {
+          motivo: 'E_ALTERADO',
+          detalle: 'El secreto llegó alterado y no se guardó.',
+        });
+        return;
+      }
       if (e instanceof ClaveInvalidada) {
         Alert.alert(
           'Hay que crear la identidad de nuevo',
