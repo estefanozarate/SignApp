@@ -1,9 +1,10 @@
 import { Signing } from '../native/Signing';
 import { bytesAB64, textoABytes } from '../lib/aleatorio';
+import { b64ABytes } from '../lib/b64';
 
 /**
  * Petición de un dominio, verificada contra el propio dominio por HTTPS.
- * Implementa §4.2, §5, §6 y §7 de diseno_app.md.
+ * Implementa §4.2, §5, §6, §7 y §10 de diseno_app.md.
  */
 
 /** §4.2 — lo que el QR contiene, y nada más. */
@@ -117,8 +118,8 @@ export async function verificar(textoQr: string): Promise<Peticion> {
     throw new PeticionInvalida('E_RED', 'El sitio respondió algo que no se pudo leer.');
   }
 
-  // §6 — las tres comparaciones. Sin ellas, el dominio podría responder
-  // cualquier cosa y la app se la creería.
+  // §6 — las comparaciones. Sin ellas, el dominio podría responder cualquier
+  // cosa y la app se la creería.
   if (r.status !== 'authorized') {
     throw new PeticionInvalida('E_NO_AUTORIZADA', 'El sitio no autorizó esta petición.');
   }
@@ -184,8 +185,19 @@ export async function pruebaDePosesion(p: Peticion, contexto: string) {
   return { proof: firmaDerB64, app_id: keyId };
 }
 
+/** §10 — el secreto que el dominio devuelve, cifrado para la clave de la app. */
+export type SecretoCifrado = {
+  alg: string;
+  encrypted_key: string;
+  iv: string;
+  ciphertext: string;
+  tag: string;
+};
+
 /** Entrega la respuesta al dominio, con el contexto de esta petición (§15). */
-export async function responder(p: Peticion, cuerpo: Record<string, unknown>) {
+export async function responder(
+  p: Peticion, cuerpo: Record<string, unknown>,
+): Promise<{ secret?: SecretoCifrado }> {
   let res: Response;
   try {
     res = await conTope(
@@ -210,8 +222,59 @@ export async function responder(p: Peticion, cuerpo: Record<string, unknown>) {
   if (res.status === 409) throw new PeticionInvalida('E_USADA', 'El sitio ya recibió una respuesta.');
   if (res.status === 410) throw new PeticionInvalida('E_EXPIRADA', 'La petición caducó antes de enviarla.');
   if (!res.ok) throw new PeticionInvalida('E_RED', `El sitio no aceptó la respuesta (${res.status}).`);
+
+  try {
+    return await res.json();
+  } catch {
+    // El secreto es opcional: en un PAIR no viene ninguno.
+    return {};
+  }
 }
 
 export async function rechazar(p: Peticion) {
   await responder(p, { type: 'DENIED', reason: 'user_denied' }).catch(() => {});
+}
+
+/**
+ * §10 — abre el secreto que el dominio cifró para esta app.
+ *
+ * Los dos pasos ocurren dentro del módulo nativo: la clave AES se desenvuelve
+ * en el chip y el dato se abre en Kotlin. Ni la privada RSA ni la clave AES
+ * cruzan el puente; aquí solo llega el claro ya descifrado.
+ */
+export async function abrirSecreto(
+  s: SecretoCifrado, p: Peticion,
+): Promise<string> {
+  if (!s?.encrypted_key || !s.iv || !s.ciphertext || !s.tag) {
+    throw new PeticionInvalida('E_SECRETO', 'El sitio no envió el secreto completo.');
+  }
+
+  const { claroB64 } = await Signing.abrirSobre(
+    s.encrypted_key, s.iv, s.ciphertext, s.tag,
+    'Abrir tu secreto',
+    p.domain,
+  );
+  return textoDeB64(claroB64);
+}
+
+/**
+ * base64 → texto UTF-8, sin depender de atob ni TextDecoder.
+ * Contrastado contra Buffer.from(...,'utf8') con acentos y emoji.
+ */
+function textoDeB64(b64: string): string {
+  const bytes = b64ABytes(b64);
+  let s = '';
+  for (let i = 0; i < bytes.length; i++) {
+    const b = bytes[i];
+    if (b < 0x80) s += String.fromCharCode(b);
+    else if (b < 0xe0) s += String.fromCharCode(((b & 31) << 6) | (bytes[++i] & 63));
+    else if (b < 0xf0) {
+      s += String.fromCharCode(((b & 15) << 12) | ((bytes[++i] & 63) << 6) | (bytes[++i] & 63));
+    } else {
+      const cp = ((b & 7) << 18) | ((bytes[++i] & 63) << 12) | ((bytes[++i] & 63) << 6) | (bytes[++i] & 63);
+      const u = cp - 0x10000;
+      s += String.fromCharCode(0xd800 + (u >> 10), 0xdc00 + (u & 1023));
+    }
+  }
+  return s;
 }
