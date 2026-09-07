@@ -23,10 +23,13 @@ type SigningNative = {
    */
   firmar(retoB64: string, titulo: string, subtitulo: string): Promise<Firma>;
   /**
-   * Descifra con la clave RSA del chip, tras autenticación del usuario.
-   * Devuelve el claro en base64.
+   * §10 — abre un sobre cifrado híbrido dentro del chip, tras autenticación.
+   * Ni la privada RSA ni la clave AES cruzan el puente: solo sale el claro.
    */
-  descifrar(cifradoB64: string, titulo: string, subtitulo: string): Promise<{ claroB64: string }>;
+  abrirSobre(
+    claveEnvueltaB64: string, ivB64: string, cifradoB64: string, tagB64: string,
+    titulo: string, subtitulo: string,
+  ): Promise<{ claroB64: string }>;
   /** Borra las claves del Keystore. Irreversible. */
   borrarIdentidad(): Promise<void>;
 };
@@ -47,6 +50,8 @@ export type Identidad = {
 export type Firma = { firmaDerB64: string; keyId: string };
 
 export class ClaveInvalidada extends Error {}
+/** GCM detectó que el dato llegó alterado: no se devuelve nada a medias. */
+export class SecretoAlterado extends Error {}
 export class BiometriaCancelada extends Error {}
 
 const nativo = NativeModules.SelloSigning as SigningNative;
@@ -56,6 +61,7 @@ function traducir(e: any): never {
     throw new ClaveInvalidada('La biometría del dispositivo cambió; hay que crear la identidad de nuevo.');
   }
   if (e?.code === 'E_USER_CANCELED') throw new BiometriaCancelada('Cancelado por el usuario.');
+  if (e?.code === 'E_ALTERADO') throw new SecretoAlterado('El secreto llegó alterado.');
   throw e;
 }
 
@@ -65,7 +71,10 @@ export const Signing = {
   crearIdentidad: () => nativo.crearIdentidad().catch(traducir),
   firmar: (retoB64: string, titulo: string, subtitulo: string) =>
     nativo.firmar(retoB64, titulo, subtitulo).catch(traducir),
-  descifrar: (cifradoB64: string, titulo: string, subtitulo: string) =>
-    nativo.descifrar(cifradoB64, titulo, subtitulo).catch(traducir),
+  abrirSobre: (
+    claveEnvueltaB64: string, ivB64: string, cifradoB64: string, tagB64: string,
+    titulo: string, subtitulo: string,
+  ) => nativo.abrirSobre(claveEnvueltaB64, ivB64, cifradoB64, tagB64, titulo, subtitulo)
+    .catch(traducir),
   borrarIdentidad: () => nativo.borrarIdentidad(),
 };

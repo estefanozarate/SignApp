@@ -6,6 +6,14 @@ export type Rutas = {
   Escaner: undefined;
   NoVerificado: { motivo: string; detalle?: string };
   Aprobacion: { peticion: Peticion };
-  Firmado: { firmaDerB64: string; keyId: string; origen: string; proposito: 'PAIR' | 'SECRET_REQUEST' };
+  Firmado: {
+    firmaDerB64: string;
+    keyId: string;
+    origen: string;
+    proposito: 'PAIR' | 'SECRET_REQUEST';
+    /** §10 — presente solo si el dominio entregó un secreto. */
+    secretoRecibido?: boolean;
+  };
+  Boveda: undefined;
   Dispositivo: undefined;
 };
