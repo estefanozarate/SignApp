@@ -14,6 +14,7 @@ import Escaner from './screens/Escaner';
 import NoVerificado from './screens/NoVerificado';
 import Aprobacion from './screens/Aprobacion';
 import Firmado from './screens/Firmado';
+import Boveda from './screens/Boveda';
 import Dispositivo from './screens/Dispositivo';
 
 const Stack = createNativeStackNavigator<Rutas>();
@@ -47,6 +48,7 @@ function Rutero() {
           <Stack.Screen name="NoVerificado" component={NoVerificado} />
           <Stack.Screen name="Aprobacion" component={Aprobacion} />
           <Stack.Screen name="Firmado" component={Firmado} />
+          <Stack.Screen name="Boveda" component={Boveda} options={{ animation: 'slide_from_right' }} />
           <Stack.Screen name="Dispositivo" component={Dispositivo} options={{ animation: 'slide_from_right' }} />
         </>
       )}
