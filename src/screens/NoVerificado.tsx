@@ -43,6 +43,18 @@ const TEXTOS: Record<string, { titulo: string; cuerpo: string }> = {
     titulo: 'Este código ya caducó.',
     cuerpo: 'Los códigos duran poco a propósito. Recarga la página del sitio para que genere uno nuevo.',
   },
+  E_ALTERADO: {
+    titulo: 'El secreto llegó alterado.',
+    cuerpo: 'La comprobación de integridad falló, así que no se guardó nada. Alguien pudo manipularlo por el camino.',
+  },
+  E_SECRETO: {
+    titulo: 'El secreto llegó incompleto.',
+    cuerpo: 'Faltan partes del dato cifrado. Pide al sitio que lo envíe otra vez.',
+  },
+  E_PRUEBA: {
+    titulo: 'El sitio no aceptó tu identidad.',
+    cuerpo: 'La prueba de que esta identidad es tuya no se pudo validar. Si acabas de crear una identidad nueva, vuelve a vincular el dispositivo.',
+  },
   E_RED: {
     titulo: 'No se pudo hablar con el sitio.',
     cuerpo: 'Comprueba tu conexión e inténtalo otra vez. No se aprobó nada.',
@@ -70,7 +82,7 @@ export default function NoVerificado({ navigation, route }: Props) {
         <H2 style={{ marginTop: 20 }}>{t.titulo}</H2>
         <Cuerpo style={{ marginTop: 12, marginBottom: 20 }}>{t.cuerpo}</Cuerpo>
 
-        {/* El detalle concreto, cuando aporta algo que el texto general no
+        {/* El detalle concreto, cuando añade algo que el texto general no
             dice. Se compara contra título Y cuerpo: antes solo miraba el
             cuerpo y el mensaje salía repetido bajo su propio título. */}
         {detalle && !t.cuerpo.includes(detalle) && !t.titulo.includes(detalle) ? (

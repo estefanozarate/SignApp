@@ -12,7 +12,7 @@ import { Rutas } from '../navigation/tipos';
 type Props = NativeStackScreenProps<Rutas, 'Firmado'>;
 
 export default function Firmado({ navigation, route }: Props) {
-  const { firmaDerB64, origen, proposito } = route.params;
+  const { firmaDerB64, origen, proposito, secretoRecibido } = route.params;
   const vinculado = proposito === 'PAIR';
   const aparece = useRef(new Animated.Value(0)).current;
 
@@ -33,14 +33,18 @@ export default function Firmado({ navigation, route }: Props) {
         </Rosette>
 
         <Animated.View style={[s.texto, { opacity: aparece }]}>
-          {/* Vincular un dispositivo y aprobar una acción no son lo mismo:
-              lo primero crea una relación duradera, lo segundo autoriza algo
-              concreto. La pantalla debería decir cuál de las dos ocurrió. */}
-          <H2 style={{ marginBottom: 8 }}>{vinculado ? 'Dispositivo vinculado' : 'Aprobado'}</H2>
+          {/* Vincular un dispositivo, aprobar una acción y recibir un secreto
+              son tres cosas distintas. La pantalla debería decir cuál ocurrió,
+              no dar el mismo acuse para las tres. */}
+          <H2 style={{ marginBottom: 8 }}>
+            {secretoRecibido ? 'Secreto guardado' : vinculado ? 'Dispositivo vinculado' : 'Aprobado'}
+          </H2>
           <Cuerpo style={{ textAlign: 'center', maxWidth: 280, marginBottom: 18 }}>
-            {vinculado
-              ? `${origen} ya reconoce este teléfono. A partir de ahora podrá pedirte aprobaciones.`
-              : `Ya puedes volver a la pantalla de ${origen}. Tu aprobación llegó allí.`}
+            {secretoRecibido
+              ? `${origen} te entregó un secreto. Se abrió dentro del chip y quedó guardado en este teléfono.`
+              : vinculado
+                ? `${origen} ya reconoce este teléfono. A partir de ahora podrá pedirte aprobaciones.`
+                : `Ya puedes volver a la pantalla de ${origen}. Tu aprobación llegó allí.`}
           </Cuerpo>
           <Text style={[tipo.mono, { color: color.grafito }]}>
             comprobante {corto(firmaDerB64)}
@@ -49,6 +53,11 @@ export default function Firmado({ navigation, route }: Props) {
       </View>
 
       <View style={s.acciones}>
+        {secretoRecibido ? (
+          <Boton style={{ marginBottom: 8 }} onPress={() => navigation.replace('Boveda')}>
+            Ver mis secretos
+          </Boton>
+        ) : null}
         <Boton variante="fantasma" onPress={() => navigation.navigate('Inicio')}>Listo</Boton>
       </View>
     </Pantalla>
