@@ -2,8 +2,9 @@
 /**
  * Dominio participante del protocolo. Sin dependencias: solo node:*.
  *
- * Implementa §4 (peticiones), §5 (verificación), §6 (identidad del dominio)
- * y §9 (registro de la app con prueba de posesión) de diseno_app.md.
+ * Implementa §4 (peticiones), §5 (verificación), §6 (identidad del dominio),
+ * §9 (registro con prueba de posesión) y §10 (entrega del secreto cifrado)
+ * de diseno_app.md.
  *
  *   POST /peticion              el sitio crea una petición
  *   GET  /verificar/:id         la app verifica; el dominio consume la petición
@@ -16,6 +17,7 @@ import { createServer } from 'node:http';
 import {
   randomBytes, generateKeyPairSync, createHash,
   createPrivateKey, createPublicKey, createVerify,
+  publicEncrypt, createCipheriv, constants,
 } from 'node:crypto';
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -67,6 +69,15 @@ const peticiones = new Map();
  */
 const apps = new Map();
 
+/**
+ * app_id → secreto que el dominio le guarda.
+ *
+ * Es lo que el §10 entrega cifrado cuando la app lo pide. En un producto real
+ * saldría de la base de datos del dominio; aquí se genera uno la primera vez
+ * que se empareja, para tener algo concreto que transferir.
+ */
+const secretos = new Map();
+
 const idValido = (v) => typeof v === 'string' && /^[0-9a-f]{32}$/i.test(v);
 const ahora = () => Math.floor(Date.now() / 1000);
 
@@ -103,6 +114,44 @@ function pruebaValida(peticion, spkiB64, firmaDerB64, contexto) {
   } catch {
     return false;
   }
+}
+
+// ── §10 cifrado del secreto para la app ───────────────────────────────────
+
+/**
+ * Cifrado híbrido: AES-256-GCM para el dato, y la clave AES envuelta con la
+ * clave pública RSA de la app.
+ *
+ * No se cifra el dato directamente con RSA porque RSA-2048 solo admite unos
+ * 190 bytes; y aunque cupiera, sería mucho más lento. GCM además autentica:
+ * si alguien altera el texto cifrado por el camino, el descifrado falla en
+ * vez de devolver basura silenciosamente.
+ *
+ * oaepHash debe ser sha256 y coincidir con lo que espera el Keystore de
+ * Android, que pide OAEPParameterSpec explícito con MGF1-SHA256. Si aquí se
+ * pusiera sha1 —el valor por defecto de Node— el descifrado fallaría en el
+ * teléfono con un error de padding sin más pista.
+ */
+function cifrarParaLaApp(secreto, spkiB64) {
+  const claveApp = createPublicKey({
+    key: Buffer.from(spkiB64, 'base64'), format: 'der', type: 'spki',
+  });
+
+  const claveAes = randomBytes(32);
+  const iv = randomBytes(12);
+  const c = createCipheriv('aes-256-gcm', claveAes, iv);
+  const ct = Buffer.concat([c.update(Buffer.from(secreto, 'utf8')), c.final()]);
+
+  return {
+    alg: 'RSA-OAEP-256+A256GCM',
+    encrypted_key: publicEncrypt(
+      { key: claveApp, padding: constants.RSA_PKCS1_OAEP_PADDING, oaepHash: 'sha256' },
+      claveAes,
+    ).toString('base64'),
+    iv: iv.toString('base64'),
+    ciphertext: ct.toString('base64'),
+    tag: c.getAuthTag().toString('base64'),
+  };
 }
 
 // ── utilidades HTTP ───────────────────────────────────────────────────────
@@ -234,7 +283,7 @@ const servidor = createServer(async (req, res) => {
       }
       // §9 — el paso que hace que registrar una clave signifique algo.
       if (!pruebaValida(p, cuerpo.app_public_key, cuerpo.proof_of_possession, p.purpose)) {
-        log(partes[1], 'PRUEBA DE POSESIÓN INVÁLIDA: rechazada');
+        log(partes[1], 'PRUEBA DE POSESION INVALIDA: rechazada');
         return responder(res, 403, { error: 'prueba de posesión inválida' });
       }
 
@@ -246,12 +295,38 @@ const servidor = createServer(async (req, res) => {
         registrada_en: ahora(),
       });
       log(partes[1], `identidad verificada y registrada: ${cuerpo.app_id.slice(0, 8)}…`);
+
+      // Al emparejar por primera vez se crea el secreto que este dominio
+      // guardará para esta app. En un producto real vendría de su base de
+      // datos; aquí se inventa para tener algo concreto que transferir.
+      if (!secretos.has(cuerpo.app_id)) {
+        secretos.set(cuerpo.app_id, `sello-demo-${randomBytes(24).toString('base64url')}`);
+      }
+
+      // §10 — si lo que se pedía era el secreto, va cifrado en la respuesta.
+      if (p.purpose === 'SECRET_REQUEST') {
+        if (!cuerpo.app_encryption_key) {
+          return responder(res, 400, { error: 'la app no envió clave de cifrado' });
+        }
+        try {
+          p.secretoCifrado = cifrarParaLaApp(secretos.get(cuerpo.app_id), cuerpo.app_encryption_key);
+          log(partes[1], 'secreto cifrado para la app');
+        } catch (e) {
+          log(partes[1], `no se pudo cifrar: ${e.message}`);
+          return responder(res, 400, { error: 'clave de cifrado no válida' });
+        }
+      }
     }
 
     p.respuesta = { ...cuerpo, verified: cuerpo.type === 'APP_IDENTITY' };
     for (const espera of p.esperando) responder(espera, 200, p.respuesta);
     p.esperando = [];
-    return responder(res, 200, { ok: true });
+
+    // El secreto solo viaja en la respuesta a QUIEN lo pidió, no al sitio:
+    // el navegador no debe verlo, solo la app.
+    return responder(res, 200, p.secretoCifrado
+      ? { ok: true, secret: p.secretoCifrado }
+      : { ok: true });
   }
 
   // ── el sitio recoge la respuesta ────────────────────────────────────────
