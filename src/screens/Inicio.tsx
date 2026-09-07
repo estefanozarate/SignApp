@@ -57,6 +57,13 @@ export default function Inicio({ navigation }: Props) {
           Escanear código
         </Boton>
 
+        <Boton
+          variante="fantasma"
+          style={{ marginTop: 10 }}
+          onPress={() => navigation.navigate('Boveda')}>
+          Tus secretos
+        </Boton>
+
         <Ceja style={{ marginTop: 32, marginBottom: 4 }}>Últimas aprobaciones</Ceja>
         {actividad.length === 0 ? (
           <Minima style={{ paddingVertical: 14 }}>
