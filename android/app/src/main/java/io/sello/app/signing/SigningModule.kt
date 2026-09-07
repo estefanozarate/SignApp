@@ -18,8 +18,10 @@ import java.security.spec.ECGenParameterSpec
 import java.security.spec.MGF1ParameterSpec
 import java.util.UUID
 import javax.crypto.Cipher
+import javax.crypto.spec.GCMParameterSpec
 import javax.crypto.spec.OAEPParameterSpec
 import javax.crypto.spec.PSource
+import javax.crypto.spec.SecretKeySpec
 
 /**
  * Identidad criptográfica del dispositivo.
@@ -188,9 +190,9 @@ class SigningModule(private val ctx: ReactApplicationContext) : ReactContextBase
      * clave AES y en el TEE la generación de 3072 tarda varios segundos.
      *
      * Ojo con OAEP: el AndroidKeyStore usa MGF1-SHA1 si no se le pasa un
-     * OAEPParameterSpec explícito, aunque el padding diga SHA-256. WebCrypto
+     * OAEPParameterSpec explícito, aunque el padding diga SHA-256. El emisor
      * usa MGF1 con el mismo hash que OAEP, así que sin el spec explícito el
-     * descifrado falla sin decir por qué. Ver descifrar().
+     * descifrado falla sin decir por qué. Ver abrirSobre().
      */
     private fun generarCifrado(strongBox: Boolean) {
         if (strongBox && Build.VERSION.SDK_INT < Build.VERSION_CODES.P) {
@@ -345,29 +347,43 @@ class SigningModule(private val ctx: ReactApplicationContext) : ReactContextBase
     // ── descifrado ──────────────────────────────────────────────────────────
 
     /**
-     * Descifra con la clave RSA del chip, tras autenticación del usuario.
+     * §10 — abre un sobre cifrado híbrido, todo dentro del módulo nativo.
+     *
+     * El dominio cifra el dato con AES-256-GCM y envuelve la clave AES con la
+     * clave pública RSA de esta app. Aquí se hacen los dos pasos: la clave se
+     * desenvuelve en el chip y el dato se abre en Kotlin. Ni la privada RSA ni
+     * la clave AES cruzan el puente a JavaScript; solo sale el claro.
      *
      * El OAEPParameterSpec explícito NO es decorativo: el AndroidKeyStore
-     * asume MGF1-SHA1 aunque el padding declare SHA-256, mientras que
-     * WebCrypto usa MGF1 con el mismo hash que OAEP. Sin pasar el spec, el
+     * asume MGF1-SHA1 aunque el padding declare SHA-256, mientras que el
+     * emisor usa MGF1 con el mismo hash que OAEP. Sin pasar el spec, el
      * descifrado falla con un error genérico y sin pista de la causa.
      *
      * Además hay que inicializar el Cipher con el spec ANTES de meterlo en el
      * CryptoObject: lo que el prompt desbloquea es esa instancia concreta.
      */
     @ReactMethod
-    fun descifrar(cifradoB64: String, titulo: String, subtitulo: String, promesa: Promise) {
+    fun abrirSobre(
+        claveEnvueltaB64: String,
+        ivB64: String,
+        cifradoB64: String,
+        tagB64: String,
+        titulo: String,
+        subtitulo: String,
+        promesa: Promise,
+    ) {
         val actividad = reactApplicationContext.currentActivity as? FragmentActivity
         if (actividad == null) {
             promesa.reject("E_SIN_ACTIVIDAD", "La app no está en primer plano.")
             return
         }
 
-        val cifrado = try {
-            Base64.decode(cifradoB64, Base64.NO_WRAP)
+        val partes = try {
+            listOf(claveEnvueltaB64, ivB64, cifradoB64, tagB64).map { Base64.decode(it, Base64.NO_WRAP) }
         } catch (e: IllegalArgumentException) {
-            promesa.reject("E_CIFRADO", "El dato cifrado no es base64 válido.", e); return
+            promesa.reject("E_CIFRADO", "El sobre cifrado no es base64 válido.", e); return
         }
+        val (claveEnvuelta, iv, cifrado, tag) = partes
 
         val cipher: Cipher = try {
             val entrada = keystore().getEntry(ALIAS_CIFRADO, null) as? KeyStore.PrivateKeyEntry
@@ -394,17 +410,43 @@ class SigningModule(private val ctx: ReactApplicationContext) : ReactContextBase
                 object : BiometricPrompt.AuthenticationCallback() {
 
                     override fun onAuthenticationSucceeded(resultado: BiometricPrompt.AuthenticationResult) {
+                        var claveAes: ByteArray? = null
                         try {
                             // Solo el Cipher que salió del CryptoObject está desbloqueado.
                             val c = resultado.cryptoObject?.cipher
                                 ?: throw IllegalStateException("El prompt no devolvió el cifrador vinculado.")
+
+                            // 1. La clave AES se desenvuelve DENTRO del chip.
+                            claveAes = c.doFinal(claveEnvuelta)
+
+                            // 2. Y el dato se abre aquí mismo, en Kotlin. Hacerlo en
+                            //    JavaScript obligaría a pasar la clave AES en claro por
+                            //    el puente, que es justo lo que este diseño evita.
+                            val gcm = Cipher.getInstance("AES/GCM/NoPadding").apply {
+                                init(
+                                    Cipher.DECRYPT_MODE,
+                                    SecretKeySpec(claveAes, "AES"),
+                                    // El tag va al final del texto cifrado en la API de
+                                    // Java; por eso se concatena en vez de pasarse aparte.
+                                    GCMParameterSpec(tag.size * 8, iv),
+                                )
+                            }
+                            val claro = gcm.doFinal(cifrado + tag)
+
                             promesa.resolve(Arguments.createMap().apply {
-                                putString("claroB64", b64(c.doFinal(cifrado)))
+                                putString("claroB64", b64(claro))
                             })
+                        } catch (e: javax.crypto.AEADBadTagException) {
+                            // GCM autentica: si el tag no cuadra, alguien alteró el
+                            // dato por el camino. No se devuelve nada a medias.
+                            promesa.reject("E_ALTERADO", "El secreto llegó alterado.", e)
                         } catch (e: Exception) {
                             // Un fallo aquí suele ser padding: el emisor cifró con
                             // otros parámetros OAEP que los que espera esta clave.
                             promesa.reject("E_DESCIFRADO", e.message, e)
+                        } finally {
+                            // La clave AES no tiene por qué seguir en memoria.
+                            claveAes?.fill(0)
                         }
                     }
 
