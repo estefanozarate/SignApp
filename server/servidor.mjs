@@ -127,10 +127,10 @@ function pruebaValida(peticion, spkiB64, firmaDerB64, contexto) {
  * si alguien altera el texto cifrado por el camino, el descifrado falla en
  * vez de devolver basura silenciosamente.
  *
- * oaepHash debe ser sha256 y coincidir con lo que espera el Keystore de
- * Android, que pide OAEPParameterSpec explícito con MGF1-SHA256. Si aquí se
- * pusiera sha1 —el valor por defecto de Node— el descifrado fallaría en el
- * teléfono con un error de padding sin más pista.
+ * La combinación OAEP-SHA256 + MGF1-SHA1 no es arbitraria: el AndroidKeyStore
+ * solo admite MGF1 con SHA-1 y rechaza SHA-256 con "Unsupported MGF1 digest".
+ * Lo descubrimos probando en el teléfono, no leyendo la documentación. Los dos
+ * lados tienen que usar exactamente estos parámetros o el descifrado falla.
  */
 function cifrarParaLaApp(secreto, spkiB64) {
   const claveApp = createPublicKey({
@@ -143,9 +143,16 @@ function cifrarParaLaApp(secreto, spkiB64) {
   const ct = Buffer.concat([c.update(Buffer.from(secreto, 'utf8')), c.final()]);
 
   return {
-    alg: 'RSA-OAEP-256+A256GCM',
+    // El nombre dice la combinación exacta, para que un cliente futuro
+    // no tenga que adivinar los parámetros.
+    alg: 'RSA-OAEP-256-MGF1SHA1+A256GCM',
     encrypted_key: publicEncrypt(
-      { key: claveApp, padding: constants.RSA_PKCS1_OAEP_PADDING, oaepHash: 'sha256' },
+      {
+        key: claveApp,
+        padding: constants.RSA_PKCS1_OAEP_PADDING,
+        oaepHash: 'sha256',
+        mgf1Hash: 'sha1',
+      },
       claveAes,
     ).toString('base64'),
     iv: iv.toString('base64'),
