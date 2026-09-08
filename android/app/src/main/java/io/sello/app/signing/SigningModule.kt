@@ -205,7 +205,11 @@ class SigningModule(private val ctx: ReactApplicationContext) : ReactContextBase
 
         val spec = KeyGenParameterSpec.Builder(ALIAS_CIFRADO, KeyProperties.PURPOSE_DECRYPT)
             .setKeySize(2048)
-            .setDigests(KeyProperties.DIGEST_SHA256)
+            // Los DOS digests. El de OAEP es SHA-256, pero MGF1 usa SHA-1 y el
+            // Keystore comprueba que la clave autorice ambos: declarando solo
+            // SHA-256, el descifrado falla con IllegalBlockSizeException, que
+            // no dice nada de la causa real.
+            .setDigests(KeyProperties.DIGEST_SHA256, KeyProperties.DIGEST_SHA1)
             .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_RSA_OAEP)
             .setUserAuthenticationRequired(true)
             .apply {
