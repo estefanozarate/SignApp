@@ -189,10 +189,10 @@ class SigningModule(private val ctx: ReactApplicationContext) : ReactContextBase
      * RSA-2048 para recibir secretos. 2048 y no 3072 porque solo envuelve una
      * clave AES y en el TEE la generación de 3072 tarda varios segundos.
      *
-     * Ojo con OAEP: el AndroidKeyStore usa MGF1-SHA1 si no se le pasa un
-     * OAEPParameterSpec explícito, aunque el padding diga SHA-256. El emisor
-     * usa MGF1 con el mismo hash que OAEP, así que sin el spec explícito el
-     * descifrado falla sin decir por qué. Ver abrirSobre().
+     * Ojo con OAEP: el AndroidKeyStore solo admite MGF1 con SHA-1, aunque el
+     * hash de OAEP sea SHA-256. Lo comprobamos en hardware: con MGF1-SHA256
+     * lanza "Unsupported MGF1 digest". El emisor tiene que cifrar con esa
+     * misma combinación. Ver abrirSobre().
      */
     private fun generarCifrado(strongBox: Boolean) {
         if (strongBox && Build.VERSION.SDK_INT < Build.VERSION_CODES.P) {
@@ -255,7 +255,7 @@ class SigningModule(private val ctx: ReactApplicationContext) : ReactContextBase
             putString("algoritmo", "ES256")
             ks.getCertificate(ALIAS_CIFRADO)?.publicKey?.let {
                 putString("clavePublicaCifradoSpkiB64", b64(it.encoded))
-                putString("algoritmoCifrado", "RSA-OAEP-256")
+                putString("algoritmoCifrado", "RSA-OAEP-256-MGF1SHA1")
             }
             putBoolean("strongBox", prefs.getBoolean(PREF_STRONGBOX, false))
             putDouble("creadaEn", prefs.getLong(PREF_CREADA, 0L).toDouble())
@@ -354,10 +354,11 @@ class SigningModule(private val ctx: ReactApplicationContext) : ReactContextBase
      * desenvuelve en el chip y el dato se abre en Kotlin. Ni la privada RSA ni
      * la clave AES cruzan el puente a JavaScript; solo sale el claro.
      *
-     * El OAEPParameterSpec explícito NO es decorativo: el AndroidKeyStore
-     * asume MGF1-SHA1 aunque el padding declare SHA-256, mientras que el
-     * emisor usa MGF1 con el mismo hash que OAEP. Sin pasar el spec, el
-     * descifrado falla con un error genérico y sin pista de la causa.
+     * MGF1 va con SHA-1, no con SHA-256. El AndroidKeyStore rechaza MGF1-SHA256
+     * con "Unsupported MGF1 digest: SHA-256. Only SHA-1 supported" — lo
+     * comprobamos en hardware, no en la documentación. El hash de OAEP sí es
+     * SHA-256; MGF1 es un parámetro aparte, y el emisor debe cifrar con esta
+     * misma combinación o el descifrado falla.
      *
      * Además hay que inicializar el Cipher con el spec ANTES de meterlo en el
      * CryptoObject: lo que el prompt desbloquea es esa instancia concreta.
@@ -393,7 +394,7 @@ class SigningModule(private val ctx: ReactApplicationContext) : ReactContextBase
                     Cipher.DECRYPT_MODE,
                     entrada.privateKey,
                     OAEPParameterSpec(
-                        "SHA-256", "MGF1", MGF1ParameterSpec.SHA256, PSource.PSpecified.DEFAULT,
+                        "SHA-256", "MGF1", MGF1ParameterSpec.SHA1, PSource.PSpecified.DEFAULT,
                     ),
                 )
             }
