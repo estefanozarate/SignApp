@@ -23,9 +23,9 @@ export default function Boveda({ navigation }: Props) {
    * a la vista de quien mire la pantalla por encima del hombro, y obliga a
    * un gesto deliberado para revelarlos.
    */
-  const alternar = (domain: string) => {
+  const alternar = (domainId: string) => {
     LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
-    setVisibles(v => (v.includes(domain) ? v.filter(d => d !== domain) : [...v, domain]));
+    setVisibles(v => (v.includes(domainId) ? v.filter(d => d !== domainId) : [...v, domainId]));
   };
 
   const olvidar = (s: SecretoGuardado) => {
@@ -37,7 +37,7 @@ export default function Boveda({ navigation }: Props) {
         {
           text: 'Olvidar',
           style: 'destructive',
-          onPress: async () => { await olvidarDominio(s.domain); recargar(); },
+          onPress: async () => { await olvidarDominio(s.domain_id); recargar(); },
         },
       ],
     );
@@ -59,12 +59,14 @@ export default function Boveda({ navigation }: Props) {
           </Minima>
         ) : (
           lista.map(s2 => {
-            const visible = visibles.includes(s2.domain);
+            // La clave de la lista es la identidad, no el nombre: dos dominios
+            // pueden mostrarse con el mismo texto y no ser el mismo.
+            const visible = visibles.includes(s2.domain_id);
             return (
-              <Tarjeta key={s2.domain} style={{ marginBottom: 12 }}>
+              <Tarjeta key={s2.domain_id} style={{ marginBottom: 12 }}>
                 <Ceja style={{ marginBottom: 8 }}>{s2.domain}</Ceja>
 
-                <Pressable onPress={() => alternar(s2.domain)} style={s.valor}>
+                <Pressable onPress={() => alternar(s2.domain_id)} style={s.valor}>
                   <Text style={[tipo.mono, { color: visible ? color.tinta : color.grafito }]}>
                     {visible ? s2.secreto : '·'.repeat(Math.min(28, s2.secreto.length))}
                   </Text>
@@ -76,7 +78,7 @@ export default function Boveda({ navigation }: Props) {
                       day: 'numeric', month: 'short', year: 'numeric',
                     })}
                   </Minima>
-                  <Pressable onPress={() => alternar(s2.domain)}>
+                  <Pressable onPress={() => alternar(s2.domain_id)}>
                     <Minima style={{ color: color.intaglio, textDecorationLine: 'underline' }}>
                       {visible ? 'Ocultar' : 'Mostrar'}
                     </Minima>

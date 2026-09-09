@@ -12,7 +12,7 @@ import { Rutas } from '../navigation/tipos';
 type Props = NativeStackScreenProps<Rutas, 'Firmado'>;
 
 export default function Firmado({ navigation, route }: Props) {
-  const { firmaDerB64, origen, proposito, secretoRecibido } = route.params;
+  const { firmaDerB64, origen, proposito, secretoRecibido, secretoEntregado } = route.params;
   const vinculado = proposito === 'PAIR';
   const aparece = useRef(new Animated.Value(0)).current;
 
@@ -37,14 +37,18 @@ export default function Firmado({ navigation, route }: Props) {
               son tres cosas distintas. La pantalla debería decir cuál ocurrió,
               no dar el mismo acuse para las tres. */}
           <H2 style={{ marginBottom: 8 }}>
-            {secretoRecibido ? 'Secreto guardado' : vinculado ? 'Dispositivo vinculado' : 'Aprobado'}
+            {secretoRecibido ? 'Secreto guardado'
+              : secretoEntregado ? 'Secreto entregado'
+                : vinculado ? 'Dispositivo vinculado' : 'Aprobado'}
           </H2>
           <Cuerpo style={{ textAlign: 'center', maxWidth: 280, marginBottom: 18 }}>
             {secretoRecibido
               ? `${origen} te entregó un secreto. Se abrió dentro del chip y quedó guardado en este teléfono.`
-              : vinculado
-                ? `${origen} ya reconoce este teléfono. A partir de ahora podrá pedirte aprobaciones.`
-                : `Ya puedes volver a la pantalla de ${origen}. Tu aprobación llegó allí.`}
+              : secretoEntregado
+                ? `${origen} recibió tu secreto, lo descifró y comprobó tu firma. Sigue guardado aquí.`
+                : vinculado
+                  ? `${origen} ya reconoce este teléfono. A partir de ahora podrá pedirte aprobaciones.`
+                  : `Ya puedes volver a la pantalla de ${origen}. Tu aprobación llegó allí.`}
           </Cuerpo>
           <Text style={[tipo.mono, { color: color.grafito }]}>
             comprobante {corto(firmaDerB64)}
@@ -53,7 +57,7 @@ export default function Firmado({ navigation, route }: Props) {
       </View>
 
       <View style={s.acciones}>
-        {secretoRecibido ? (
+        {secretoRecibido || secretoEntregado ? (
           <Boton style={{ marginBottom: 8 }} onPress={() => navigation.replace('Boveda')}>
             Ver mis secretos
           </Boton>

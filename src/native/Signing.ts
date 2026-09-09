@@ -30,6 +30,12 @@ type SigningNative = {
     claveEnvueltaB64: string, ivB64: string, cifradoB64: string, tagB64: string,
     titulo: string, subtitulo: string,
   ): Promise<{ claroB64: string }>;
+  /**
+   * §14 — cierra un sobre cifrado para la clave pública del dominio. No pide
+   * biometría: solo usa material público. Lo que exige autenticación es la
+   * firma que va dentro.
+   */
+  cerrarSobre(clavePublicaSpkiB64: string, claroB64: string): Promise<Sobre>;
   /** Borra las claves del Keystore. Irreversible. */
   borrarIdentidad(): Promise<void>;
 };
@@ -40,7 +46,8 @@ export type Identidad = {
   algoritmo: 'ES256';
   /** §10 — clave con la que el dominio cifra secretos para esta app. */
   clavePublicaCifradoSpkiB64?: string;
-  algoritmoCifrado?: 'RSA-OAEP-256';
+  /** MGF1 va con SHA-1 aunque el hash de OAEP sea SHA-256: el Keystore no admite otra cosa. */
+  algoritmoCifrado?: 'RSA-OAEP-256-MGF1SHA1';
   strongBox: boolean;
   creadaEn: number;
   /** Cadena de key attestation para que un verificador compruebe el origen hardware. */
@@ -48,6 +55,15 @@ export type Identidad = {
 };
 
 export type Firma = { firmaDerB64: string; keyId: string };
+
+/** §14 — sobre cifrado híbrido, tal y como sale del módulo nativo. */
+export type Sobre = {
+  alg: string;
+  claveEnvueltaB64: string;
+  ivB64: string;
+  cifradoB64: string;
+  tagB64: string;
+};
 
 export class ClaveInvalidada extends Error {}
 /** GCM detectó que el dato llegó alterado: no se devuelve nada a medias. */
@@ -76,5 +92,7 @@ export const Signing = {
     titulo: string, subtitulo: string,
   ) => nativo.abrirSobre(claveEnvueltaB64, ivB64, cifradoB64, tagB64, titulo, subtitulo)
     .catch(traducir),
+  cerrarSobre: (clavePublicaSpkiB64: string, claroB64: string) =>
+    nativo.cerrarSobre(clavePublicaSpkiB64, claroB64).catch(traducir),
   borrarIdentidad: () => nativo.borrarIdentidad(),
 };
