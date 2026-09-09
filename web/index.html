@@ -42,8 +42,9 @@
   <p class="ceja">Demo del lado navegador</p>
   <h1>Sello</h1>
   <p>
-    El dominio emite una petición, tu teléfono la verifica contra el propio dominio por
-    HTTPS y responde con su identidad y una prueba de posesión de su clave privada.
+    Al emparejar, el dominio verifica la prueba de posesión y le entrega a tu teléfono
+    un secreto cifrado (§10). Después puede pedírselo de vuelta: la app lo firma con su
+    clave y lo cifra para este dominio, que descifra y comprueba la firma (§14).
   </p>
 
   <div class="tarjeta">
@@ -85,7 +86,7 @@ const leerApp = () => JSON.parse(localStorage.getItem('sello.app') || 'null');
 function pintar() {
   const a = leerApp();
   $('estadoTel').innerHTML = a ? pill('ok', a.app_id.slice(0, 8) + '··') : pill('esp', 'Ninguna');
-  $('btnEntrar').textContent = a ? 'Pedir el secreto al teléfono' : 'Emparejar un teléfono';
+  $('btnEntrar').textContent = a ? 'Pedir el secreto de vuelta' : 'Emparejar un teléfono';
   $('btnOlvidar').style.display = a ? '' : 'none';
 }
 pintar();
@@ -158,31 +159,50 @@ $('btnEntrar').onclick = async () => {
     const emparejada = leerApp();
     const res = await operar(
       emparejada ? 'SECRET_REQUEST' : 'PAIR',
-      emparejada ? 'Recuperar tu acceso' : 'Vincular este dispositivo',
+      emparejada ? 'Devolver el secreto que te guardó' : 'Vincular este dispositivo',
     );
     if (!res) return;
     const { peticion, respuesta } = res;
 
-    if (respuesta.type !== 'APP_IDENTITY') {
-      $('resultado').innerHTML = pill('mal', 'Respuesta inesperada');
+    // §10 — emparejar: el dominio verificó la prueba de posesión y le entregó
+    // el secreto a la app, cifrado. Esta página nunca lo ve; solo su huella.
+    if (respuesta.type === 'APP_IDENTITY') {
+      localStorage.setItem('sello.app', JSON.stringify({
+        app_id: respuesta.app_id,
+        request_id: peticion.request_id,
+        secret_fingerprint: respuesta.secret_fingerprint,
+      }));
+      pintar();
+      $('resultado').innerHTML = `${pill('ok', 'Emparejado')}
+        <p class="mono" style="margin-top:12px">app_id ${respuesta.app_id}</p>
+        <p class="mono">secreto ${respuesta.secret_fingerprint}…</p>
+        <p style="margin-top:8px;font-size:13px">El dominio verificó la prueba de
+        posesión (§9) y entregó el secreto cifrado para la clave de la app (§10).
+        Ahora vive en el teléfono; pídeselo con el otro botón.</p>`;
       return;
     }
 
-    // §9 — el dominio verificaría aquí la prueba de posesión con la clave
-    // pública que acompaña. Esa comprobación vive en el servidor, no en esta
-    // página: una página estática no puede custodiar el registro.
-    localStorage.setItem('sello.app', JSON.stringify({
-      app_id: respuesta.app_id,
-      app_public_key: respuesta.app_public_key,
-      app_encryption_key: respuesta.app_encryption_key,
-      request_id: peticion.request_id,
-    }));
-    pintar();
+    // §14 — devolver: la app lo firmó y lo cifró para este dominio, y el
+    // dominio lo descifró y comprobó la firma. Lo que se muestra es su
+    // veredicto, no el secreto: el §14 se lo entrega al dominio, y una página
+    // estática no tiene dónde custodiarlo.
+    if (respuesta.type === 'SECRET_RESPONSE') {
+      const guardada = leerApp()?.secret_fingerprint;
+      const mismo = guardada && guardada === respuesta.secret_fingerprint;
+      $('resultado').innerHTML = `${pill(respuesta.matches ? 'ok' : 'mal',
+          respuesta.matches ? 'Secreto recuperado' : 'El secreto no coincide')}
+        ${pill(respuesta.signature_valid ? 'ok' : 'mal',
+          respuesta.signature_valid ? 'Firma verificada' : 'Firma inválida')}
+        <p class="mono" style="margin-top:12px">secreto ${respuesta.secret_fingerprint}…</p>
+        <p style="margin-top:8px;font-size:13px">
+        ${mismo ? 'Es la misma huella que se entregó al emparejar: el viaje de ida y vuelta fue íntegro.'
+                : 'La huella no es la que se entregó al emparejar.'}
+        El dominio abrió el sobre con su clave privada y validó la firma contra
+        la clave pública que registró en el §9.</p>`;
+      return;
+    }
 
-    $('resultado').innerHTML = `${pill('ok', 'Identidad recibida')}
-      <p class="mono" style="margin-top:12px">app_id ${respuesta.app_id}</p>
-      <p style="margin-top:8px;font-size:13px">Llegó con prueba de posesión. La
-      verificación de esa prueba es del §9 y va en la Fase 2.</p>`;
+    $('resultado').innerHTML = pill('mal', 'Respuesta inesperada');
   } finally {
     $('btnEntrar').disabled = false;
   }
