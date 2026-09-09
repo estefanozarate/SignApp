@@ -3,8 +3,14 @@
  * Dominio participante del protocolo. Sin dependencias: solo node:*.
  *
  * Implementa §4 (peticiones), §5 (verificación), §6 (identidad del dominio),
- * §9 (registro con prueba de posesión) y §10 (entrega del secreto cifrado)
- * de diseno_app.md.
+ * §9 (registro con prueba de posesión), §10 (entrega del secreto al
+ * emparejar) y §14 (descifrado y verificación de la firma cuando la app lo
+ * devuelve) de diseno_app.md.
+ *
+ * El sentido importa y antes estaba invertido: el §10 dice que el secreto lo
+ * ENTREGA el dominio al emparejar, y el §12/§14 que después es la APP quien
+ * lo devuelve firmado y cifrado. El dominio ya no manda el secreto en un
+ * SECRET_REQUEST; lo recibe y lo comprueba.
  *
  *   POST /peticion              el sitio crea una petición
  *   GET  /verificar/:id         la app verifica; el dominio consume la petición
@@ -17,7 +23,8 @@ import { createServer } from 'node:http';
 import {
   randomBytes, generateKeyPairSync, createHash,
   createPrivateKey, createPublicKey, createVerify,
-  publicEncrypt, createCipheriv, constants,
+  publicEncrypt, privateDecrypt, createCipheriv, createDecipheriv,
+  timingSafeEqual, constants,
 } from 'node:crypto';
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -32,7 +39,7 @@ const LIMPIEZA_MS = 60000;
 /** §15: los propósitos válidos. Una petición de un tipo no sirve para el otro. */
 const PROPOSITOS = new Set(['PAIR', 'SECRET_REQUEST']);
 
-// ── §3.2 identidad del dominio, persistida ────────────────────────────────
+// ── §3.2 identidad del dominio, persistida ──────────────────────────
 
 /**
  * El domain_id se deriva de esta clave. Si cambiara entre reinicios, las apps
@@ -70,18 +77,22 @@ const peticiones = new Map();
 const apps = new Map();
 
 /**
- * app_id → secreto que el dominio le guarda.
+ * app_id → secreto que el dominio le entregó (§10).
  *
- * Es lo que el §10 entrega cifrado cuando la app lo pide. En un producto real
- * saldría de la base de datos del dominio; aquí se genera uno la primera vez
- * que se empareja, para tener algo concreto que transferir.
+ * Se crea al emparejar y se entrega ahí mismo, cifrado para la app. El
+ * dominio conserva su copia por un motivo concreto: es contra ella que
+ * comprueba, en el §14, que lo que la app devuelve es lo que él dio.
+ *
+ * En un producto real esto vive en la base de datos del dominio. Aquí, en
+ * memoria: al reiniciar el proceso hay que volver a emparejar, aunque la
+ * clave del dominio persista.
  */
 const secretos = new Map();
 
 const idValido = (v) => typeof v === 'string' && /^[0-9a-f]{32}$/i.test(v);
 const ahora = () => Math.floor(Date.now() / 1000);
 
-// ── §7 y §9 verificación de la prueba de posesión ─────────────────────────
+// ── §7 y §9 verificación de la prueba de posesión ─────────────────────
 
 /**
  * La app firma los bytes UTF-8 de estos campos unidos por 0x1f. Reconstruimos
@@ -116,7 +127,7 @@ function pruebaValida(peticion, spkiB64, firmaDerB64, contexto) {
   }
 }
 
-// ── §10 cifrado del secreto para la app ───────────────────────────────────
+// ── §10 cifrado del secreto para la app ─────────────────────────────
 
 /**
  * Cifrado híbrido: AES-256-GCM para el dato, y la clave AES envuelta con la
@@ -161,7 +172,83 @@ function cifrarParaLaApp(secreto, spkiB64) {
   };
 }
 
-// ── utilidades HTTP ───────────────────────────────────────────────────────
+// ── §14 la app devuelve el secreto: abrir y verificar ───────────────────
+
+/**
+ * Abre el sobre que la app cifró para este dominio. El inverso exacto de
+ * cerrarSobre() en Kotlin, con los mismos parámetros OAEP: SHA-256 para el
+ * hash y SHA-1 para MGF1. Si no coincidieran, esto fallaría con un error de
+ * padding que no dice nada de la causa.
+ *
+ * Lanza si algo no cuadra — y que lance es la respuesta correcta: GCM
+ * autentica, así que un fallo aquí significa que el dato llegó alterado o que
+ * no iba dirigido a este dominio. En ningún caso hay algo que aprovechar.
+ */
+function abrirDeLaApp(sobre) {
+  const claveAes = privateDecrypt(
+    {
+      key: domainPriv,
+      padding: constants.RSA_PKCS1_OAEP_PADDING,
+      oaepHash: 'sha256',
+      mgf1Hash: 'sha1',
+    },
+    Buffer.from(sobre.encrypted_key, 'base64'),
+  );
+
+  try {
+    const d = createDecipheriv('aes-256-gcm', claveAes, Buffer.from(sobre.iv, 'base64'));
+    d.setAuthTag(Buffer.from(sobre.tag, 'base64'));
+    const claro = Buffer.concat([
+      d.update(Buffer.from(sobre.ciphertext, 'base64')),
+      d.final(),
+    ]);
+    return JSON.parse(claro.toString('utf8'));
+  } finally {
+    claveAes.fill(0);
+  }
+}
+
+/**
+ * §14 — los bytes que la app firmó. Se reconstruyen campo a campo, en el
+ * mismo orden y con el mismo separador que usa canonicoDeLaRespuesta() en la
+ * app: no se firma el JSON, porque dos serializaciones del mismo objeto
+ * pueden diferir en el orden de las claves y entonces la firma no verifica
+ * por un motivo que no tiene nada que ver con la seguridad.
+ */
+function bytesDeLaRespuesta(r, domain) {
+  return Buffer.from(
+    ['sello/secreto/v1', domain, r.request_id, r.nonce, r.domain_id, r.app_id, r.secret]
+      .join('\u001f'),
+    'utf8',
+  );
+}
+
+function firmaValida(bytes, spkiB64, firmaDerB64) {
+  try {
+    const clave = createPublicKey({
+      key: Buffer.from(spkiB64, 'base64'), format: 'der', type: 'spki',
+    });
+    return createVerify('SHA256').update(bytes).verify(clave, Buffer.from(firmaDerB64, 'base64'));
+  } catch {
+    return false;
+  }
+}
+
+/** Comparación en tiempo constante: comparar secretos con === filtra información. */
+function iguales(a, b) {
+  const x = Buffer.from(String(a), 'utf8');
+  const y = Buffer.from(String(b), 'utf8');
+  return x.length === y.length && timingSafeEqual(x, y);
+}
+
+/**
+ * Huella corta del secreto, para que el navegador pueda enseñar algo sin ver
+ * el secreto. El §14 lo entrega al dominio, no a la página: una página
+ * estática no tiene dónde custodiarlo.
+ */
+const huella = (s) => createHash('sha256').update(String(s), 'utf8').digest('hex').slice(0, 16);
+
+// ── utilidades HTTP ───────────────────────────────────────────
 
 function responder(res, codigo, cuerpo) {
   res.writeHead(codigo, {
@@ -193,7 +280,7 @@ const servidor = createServer(async (req, res) => {
 
   if (req.method === 'OPTIONS') return responder(res, 204);
 
-  // ── §4.1 el sitio crea la petición ──────────────────────────────────────
+  // ── §4.1 el sitio crea la petición ───────────────────────────────
   if (req.method === 'POST' && url.pathname === '/peticion') {
     let cuerpo;
     try { cuerpo = await leerCuerpo(req); } catch (e) { return responder(res, 400, { error: e.message }); }
@@ -267,7 +354,7 @@ const servidor = createServer(async (req, res) => {
     });
   }
 
-  // ── §9 la app entrega su identidad; el dominio la verifica ──────────────
+  // ── §9 la app entrega su identidad; §14 devuelve el secreto ─────────────
   if (req.method === 'POST' && partes[0] === 'respuesta' && idValido(partes[1])) {
     const p = peticiones.get(partes[1]);
     if (!p) return responder(res, 404, { error: 'no existe' });
@@ -284,6 +371,18 @@ const servidor = createServer(async (req, res) => {
       return responder(res, 400, { error: 'contexto incorrecto' });
     }
 
+    // §19 "wrong operation/purpose": cada propósito admite un tipo de
+    // respuesta y solo uno. Un DENIED se acepta siempre — es la app diciendo
+    // que el usuario no quiso.
+    const ESPERADO = { PAIR: 'APP_IDENTITY', SECRET_REQUEST: 'SECRET_RESPONSE' };
+    if (cuerpo.type !== 'DENIED' && cuerpo.type !== ESPERADO[p.purpose]) {
+      log(partes[1], `tipo ${cuerpo.type} no corresponde a ${p.purpose}: rechazada`);
+      return responder(res, 400, { error: 'tipo de respuesta incorrecto' });
+    }
+
+    let acuse = { ok: true };
+
+    // ── §9 y §10 emparejamiento ─────────────────────────────────
     if (cuerpo.type === 'APP_IDENTITY') {
       if (!cuerpo.app_id || !cuerpo.app_public_key || !cuerpo.proof_of_possession) {
         return responder(res, 400, { error: 'faltan datos de identidad' });
@@ -292,6 +391,11 @@ const servidor = createServer(async (req, res) => {
       if (!pruebaValida(p, cuerpo.app_public_key, cuerpo.proof_of_possession, p.purpose)) {
         log(partes[1], 'PRUEBA DE POSESION INVALIDA: rechazada');
         return responder(res, 403, { error: 'prueba de posesión inválida' });
+      }
+      // §10 — sin clave de cifrado no hay forma de entregarle el secreto, y
+      // el emparejamiento sin secreto dejaría la fase siguiente sin objeto.
+      if (!cuerpo.app_encryption_key) {
+        return responder(res, 400, { error: 'la app no envió clave de cifrado' });
       }
 
       // §13: re-emparejar sustituye la identidad anterior de ese app_id.
@@ -303,40 +407,112 @@ const servidor = createServer(async (req, res) => {
       });
       log(partes[1], `identidad verificada y registrada: ${cuerpo.app_id.slice(0, 8)}…`);
 
-      // Al emparejar por primera vez se crea el secreto que este dominio
-      // guardará para esta app. En un producto real vendría de su base de
-      // datos; aquí se inventa para tener algo concreto que transferir.
-      if (!secretos.has(cuerpo.app_id)) {
-        secretos.set(cuerpo.app_id, `sello-demo-${randomBytes(24).toString('base64url')}`);
-      }
+      // §10 — el secreto se crea y se ENTREGA aquí, al emparejar. Volver a
+      // emparejar genera uno nuevo: la app se queda con el último, y así los
+      // dos lados siguen teniendo el mismo dato.
+      const secreto = `sello-demo-${randomBytes(24).toString('base64url')}`;
+      secretos.set(cuerpo.app_id, secreto);
 
-      // §10 — si lo que se pedía era el secreto, va cifrado en la respuesta.
-      if (p.purpose === 'SECRET_REQUEST') {
-        if (!cuerpo.app_encryption_key) {
-          return responder(res, 400, { error: 'la app no envió clave de cifrado' });
-        }
-        try {
-          p.secretoCifrado = cifrarParaLaApp(secretos.get(cuerpo.app_id), cuerpo.app_encryption_key);
-          log(partes[1], 'secreto cifrado para la app');
-        } catch (e) {
-          log(partes[1], `no se pudo cifrar: ${e.message}`);
-          return responder(res, 400, { error: 'clave de cifrado no válida' });
-        }
+      try {
+        acuse = { ok: true, secret: cifrarParaLaApp(secreto, cuerpo.app_encryption_key) };
+      } catch (e) {
+        log(partes[1], `no se pudo cifrar: ${e.message}`);
+        return responder(res, 400, { error: 'clave de cifrado no válida' });
       }
+      log(partes[1], `secreto entregado cifrado (${huella(secreto)}…)`);
+
+      p.resultadoParaElSitio = {
+        type: 'APP_IDENTITY',
+        verified: true,
+        app_id: cuerpo.app_id,
+        secret_delivered: true,
+        secret_fingerprint: huella(secreto),
+      };
     }
 
-    p.respuesta = { ...cuerpo, verified: cuerpo.type === 'APP_IDENTITY' };
+    // ── §14 la app devuelve el secreto ─────────────────────────────
+    if (cuerpo.type === 'SECRET_RESPONSE') {
+      const sobre = cuerpo.envelope;
+      if (!sobre?.encrypted_key || !sobre.iv || !sobre.ciphertext || !sobre.tag) {
+        return responder(res, 400, { error: 'sobre incompleto' });
+      }
+
+      let claro;
+      try {
+        claro = abrirDeLaApp(sobre);
+      } catch (e) {
+        // §19 "decryption failure" / "authentication tag failure". No se
+        // distingue cuál de los dos en la respuesta: al que lo intenta no le
+        // conviene saber en qué paso falló.
+        log(partes[1], `no se pudo abrir el sobre: ${e.message}`);
+        return responder(res, 400, { error: 'no se pudo abrir la respuesta' });
+      }
+
+      // El contexto va DENTRO del sobre, no solo fuera. Lo de fuera lo puede
+      // escribir cualquiera; esto está cubierto por la firma.
+      if (claro.request_id !== p.request_id || claro.nonce !== p.nonce) {
+        log(partes[1], 'el contexto firmado no cuadra: rechazada');
+        return responder(res, 400, { error: 'contexto incorrecto' });
+      }
+      // §16 — la respuesta iba dirigida a ESTE dominio, no a otro.
+      if (claro.domain_id !== DOMAIN_ID) {
+        log(partes[1], 'la respuesta iba dirigida a otro dominio: rechazada');
+        return responder(res, 400, { error: 'dominio incorrecto' });
+      }
+
+      // §19 "unknown App identity": solo se acepta de una app emparejada, y
+      // se verifica con la clave que se registró entonces — no con una que
+      // venga en este mensaje.
+      const app = apps.get(claro.app_id);
+      if (!app) {
+        log(partes[1], `app desconocida: ${String(claro.app_id).slice(0, 8)}…`);
+        return responder(res, 403, { error: 'identidad desconocida' });
+      }
+
+      if (!claro.signature ||
+          !firmaValida(bytesDeLaRespuesta(claro, p.domain), app.app_public_key, claro.signature)) {
+        log(partes[1], 'FIRMA DE LA RESPUESTA INVALIDA: rechazada');
+        return responder(res, 403, { error: 'firma inválida' });
+      }
+
+      // Que el secreto sea el que este dominio entregó es una comprobación
+      // de la aplicación, no del protocolo: la firma ya demuestra quién
+      // responde. Sirve para ver que el viaje de ida y vuelta fue íntegro.
+      const esperado = secretos.get(claro.app_id);
+      const coincide = esperado !== undefined && iguales(esperado, claro.secret);
+      log(partes[1], coincide
+        ? `secreto recuperado y verificado (${huella(claro.secret)}…)`
+        : 'firma válida pero el secreto NO coincide con el entregado');
+
+      acuse = {
+        ok: true,
+        signature_valid: true,
+        matches: coincide,
+        secret_fingerprint: huella(claro.secret),
+      };
+
+      // El secreto en claro no se le devuelve al navegador: el §14 lo entrega
+      // al dominio, y el dominio es este proceso. La página ve la huella.
+      p.resultadoParaElSitio = {
+        type: 'SECRET_RESPONSE',
+        verified: true,
+        app_id: claro.app_id,
+        signature_valid: true,
+        matches: coincide,
+        secret_fingerprint: huella(claro.secret),
+      };
+    }
+
+    // Lo que recoge el sitio va aparte de lo que responde la app: el sobre
+    // cifrado no tiene por qué llegar al navegador.
+    p.respuesta = p.resultadoParaElSitio ?? { type: cuerpo.type, verified: false, reason: cuerpo.reason };
     for (const espera of p.esperando) responder(espera, 200, p.respuesta);
     p.esperando = [];
 
-    // El secreto solo viaja en la respuesta a QUIEN lo pidió, no al sitio:
-    // el navegador no debe verlo, solo la app.
-    return responder(res, 200, p.secretoCifrado
-      ? { ok: true, secret: p.secretoCifrado }
-      : { ok: true });
+    return responder(res, 200, acuse);
   }
 
-  // ── el sitio recoge la respuesta ────────────────────────────────────────
+  // ── el sitio recoge la respuesta ─────────────────────────────────
   if (req.method === 'GET' && partes[0] === 'respuesta' && idValido(partes[1])) {
     const p = peticiones.get(partes[1]);
     if (!p) return responder(res, 404, { error: 'no existe' });
