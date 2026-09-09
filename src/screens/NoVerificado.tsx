@@ -51,6 +51,18 @@ const TEXTOS: Record<string, { titulo: string; cuerpo: string }> = {
     titulo: 'El secreto llegó incompleto.',
     cuerpo: 'Faltan partes del dato cifrado. Pide al sitio que lo envíe otra vez.',
   },
+  E_SIN_SECRETO: {
+    titulo: 'No tienes ningún secreto de este sitio.',
+    cuerpo: 'Pedir el secreto no es lo mismo que vincularse: este dominio nunca te entregó uno, o lo olvidaste desde la bóveda. Vincula el dispositivo otra vez para recibirlo.',
+  },
+  E_FIRMA: {
+    titulo: 'El sitio no aceptó tu firma.',
+    cuerpo: 'La respuesta llegó, pero el dominio no pudo validar que la hubieras firmado tú. El secreto no se dio por entregado.',
+  },
+  E_CLAVE_DOMINIO: {
+    titulo: 'La clave del sitio no sirve.',
+    cuerpo: 'El dominio presentó una clave pública que no se puede usar para cifrarle nada. No se envió el secreto.',
+  },
   E_PRUEBA: {
     titulo: 'El sitio no aceptó tu identidad.',
     cuerpo: 'La prueba de que esta identidad es tuya no se pudo validar. Si acabas de crear una identidad nueva, vuelve a vincular el dispositivo.',

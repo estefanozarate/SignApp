@@ -11,11 +11,15 @@ import androidx.biometric.BiometricPrompt
 import androidx.core.content.ContextCompat
 import androidx.fragment.app.FragmentActivity
 import com.facebook.react.bridge.*
+import java.security.KeyFactory
 import java.security.KeyPairGenerator
 import java.security.KeyStore
+import java.security.SecureRandom
 import java.security.Signature
+import java.security.interfaces.RSAPublicKey
 import java.security.spec.ECGenParameterSpec
 import java.security.spec.MGF1ParameterSpec
+import java.security.spec.X509EncodedKeySpec
 import java.util.UUID
 import javax.crypto.Cipher
 import javax.crypto.spec.GCMParameterSpec
@@ -67,7 +71,7 @@ class SigningModule(private val ctx: ReactApplicationContext) : ReactContextBase
     private fun keystore(): KeyStore =
         KeyStore.getInstance(ANDROID_KEYSTORE).apply { load(null) }
 
-    // ── consulta ────────────────────────────────────────────────────────────
+    // ── consulta ───────────────────────────────────────────────
 
     @ReactMethod
     fun tieneIdentidad(promesa: Promise) {
@@ -92,7 +96,7 @@ class SigningModule(private val ctx: ReactApplicationContext) : ReactContextBase
         }
     }
 
-    // ── creación ────────────────────────────────────────────────────────────
+    // ── creación ──────────────────────────────────────────────
 
     /**
      * EC P-256, PURPOSE_SIGN, no exportable. Se intenta primero en StrongBox
@@ -267,7 +271,7 @@ class SigningModule(private val ctx: ReactApplicationContext) : ReactContextBase
         }
     }
 
-    // ── firma ───────────────────────────────────────────────────────────────
+    // ── firma ─────────────────────────────────────────────────
 
     /**
      * El reto llega en base64 y se firma dentro del chip. El texto del prompt
@@ -348,7 +352,7 @@ class SigningModule(private val ctx: ReactApplicationContext) : ReactContextBase
         }
     }
 
-    // ── descifrado ──────────────────────────────────────────────────────────
+    // ── descifrado ────────────────────────────────────────────
 
     /**
      * §10 — abre un sobre cifrado híbrido, todo dentro del módulo nativo.
@@ -479,7 +483,101 @@ class SigningModule(private val ctx: ReactApplicationContext) : ReactContextBase
         }
     }
 
-    // ── borrado ─────────────────────────────────────────────────────────────
+    // ── cifrado ──────────────────────────────────────────────
+
+    /**
+     * §14 — cierra un sobre cifrado para el dominio. El inverso de abrirSobre().
+     *
+     * Aquí solo se usa la clave PÚBLICA del dominio, así que no hay nada del
+     * Keystore de por medio y no se pide biometría: la autenticación ya la
+     * exigió la firma que va dentro del sobre. Pedirla otra vez sería un
+     * segundo prompt para una operación que cualquiera podría hacer con datos
+     * públicos.
+     *
+     * Mismo esquema que en sentido contrario, y por los mismos motivos: la
+     * clave AES envuelta con RSA-OAEP y el dato con AES-256-GCM. RSA-2048
+     * solo admitiría unos 190 bytes directos, y GCM autentica: si alguien
+     * altera el texto cifrado, el servidor lo detecta en vez de descifrar
+     * basura.
+     *
+     * OAEP va con SHA-256 y MGF1 con SHA-1, igual que al descifrar. Aquí la
+     * clave no es del Keystore, así que el proveedor sí admitiría MGF1-SHA256,
+     * pero se mantiene la misma combinación en los dos sentidos: un solo
+     * conjunto de parámetros que recordar, y el mismo que ya está probado en
+     * hardware. El servidor tiene que descifrar con exactamente estos.
+     */
+    @ReactMethod
+    fun cerrarSobre(clavePublicaSpkiB64: String, claroB64: String, promesa: Promise) {
+        var claveAes: ByteArray? = null
+        try {
+            val spki = try {
+                Base64.decode(clavePublicaSpkiB64, Base64.NO_WRAP)
+            } catch (e: IllegalArgumentException) {
+                promesa.reject("E_CLAVE_DOMINIO", "La clave del dominio no es base64 válida.", e); return
+            }
+            val claro = try {
+                Base64.decode(claroB64, Base64.NO_WRAP)
+            } catch (e: IllegalArgumentException) {
+                promesa.reject("E_CIFRADO", "El dato a cifrar no es base64 válido.", e); return
+            }
+
+            // La clave llega de la verificación del dominio, no de un sitio de
+            // confianza absoluta: se comprueba que sea lo que dice ser antes de
+            // usarla. Una clave corta cifraría, y el resultado sería inútil.
+            val publica = try {
+                KeyFactory.getInstance("RSA").generatePublic(X509EncodedKeySpec(spki))
+            } catch (e: Exception) {
+                promesa.reject("E_CLAVE_DOMINIO", "La clave del dominio no es una clave RSA válida.", e); return
+            }
+            if (publica !is RSAPublicKey || publica.modulus.bitLength() < 2048) {
+                promesa.reject("E_CLAVE_DOMINIO", "La clave del dominio es demasiado corta.")
+                return
+            }
+
+            val azar = SecureRandom()
+            claveAes = ByteArray(32).also { azar.nextBytes(it) }
+            val iv = ByteArray(12).also { azar.nextBytes(it) }
+
+            val gcm = Cipher.getInstance("AES/GCM/NoPadding").apply {
+                init(Cipher.ENCRYPT_MODE, SecretKeySpec(claveAes, "AES"), GCMParameterSpec(128, iv))
+            }
+            // La API de Java devuelve texto cifrado y tag pegados; se separan
+            // porque el otro lado los recibe como campos distintos.
+            val salida = gcm.doFinal(claro)
+            val corte = salida.size - 16
+            val cifrado = salida.copyOfRange(0, corte)
+            val tag = salida.copyOfRange(corte, salida.size)
+
+            val rsa = Cipher.getInstance("RSA/ECB/OAEPPadding").apply {
+                init(
+                    Cipher.ENCRYPT_MODE,
+                    publica,
+                    OAEPParameterSpec(
+                        "SHA-256", "MGF1", MGF1ParameterSpec.SHA1, PSource.PSpecified.DEFAULT,
+                    ),
+                )
+            }
+            val envuelta = rsa.doFinal(claveAes)
+
+            promesa.resolve(Arguments.createMap().apply {
+                // El nombre dice la combinación exacta, para que el otro lado
+                // no tenga que adivinar los parámetros.
+                putString("alg", "RSA-OAEP-256-MGF1SHA1+A256GCM")
+                putString("claveEnvueltaB64", b64(envuelta))
+                putString("ivB64", b64(iv))
+                putString("cifradoB64", b64(cifrado))
+                putString("tagB64", b64(tag))
+            })
+        } catch (e: Exception) {
+            promesa.reject("E_CIFRADO", e.message, e)
+        } finally {
+            // El claro sigue en JavaScript, pero la clave AES no tiene por qué
+            // seguir en memoria aquí.
+            claveAes?.fill(0)
+        }
+    }
+
+    // ── borrado ──────────────────────────────────────────────
 
     @ReactMethod
     fun borrarIdentidad(promesa: Promise) {
