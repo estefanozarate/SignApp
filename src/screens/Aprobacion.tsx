@@ -6,9 +6,10 @@ import { Boton, Ceja, Cuerpo, Fila, Minima, Origen, Pildora, Tarjeta } from '../
 import { Cerrar, Check } from '../components/Iconos';
 import { color, espacio, radio, tipo } from '../theme';
 import {
-  abrirSecreto, contextoDe, pruebaDePosesion, rechazar, responder, PeticionInvalida,
+  abrirSecreto, contextoDe, entregarSecreto, pruebaDePosesion, rechazar, responder,
+  PeticionInvalida,
 } from '../services/peticion';
-import { guardar } from '../services/boveda';
+import { guardar, paraDominio, SecretoGuardado } from '../services/boveda';
 import { BiometriaCancelada, ClaveInvalidada, SecretoAlterado, Signing } from '../native/Signing';
 import { anotar } from '../services/actividad';
 import { retoLegible } from '../lib/b64';
@@ -18,10 +19,38 @@ type Props = NativeStackScreenProps<Rutas, 'Aprobacion'>;
 
 export default function Aprobacion({ navigation, route }: Props) {
   const { peticion } = route.params;
+  const entrega = peticion.purpose === 'SECRET_REQUEST';
   const [ocupado, setOcupado] = useState(false);
   const [restante, setRestante] = useState(peticion.expires_at - Math.floor(Date.now() / 1000));
   const [detalles, setDetalles] = useState(false);
+  // undefined mientras se consulta la bóveda; null si no hay nada que entregar.
+  const [guardado, setGuardado] = useState<SecretoGuardado | null | undefined>(
+    entrega ? undefined : null,
+  );
   const resuelto = useRef(false);
+
+  /**
+   * §13 — el emparejamiento crítico, y ANTES de pedir biometría.
+   *
+   * Si este dominio no tiene un secreto guardado bajo su identidad, no hay
+   * nada que entregar y no tiene sentido mostrar un botón de aprobar. La
+   * comparación es contra domain_id y clave pública, nunca contra el nombre.
+   */
+  useEffect(() => {
+    if (!entrega) return;
+    let vivo = true;
+    paraDominio(peticion.domain_id, peticion.domain_public_key).then(s => {
+      if (!vivo) return;
+      if (s) { setGuardado(s); return; }
+      setGuardado(null);
+      resuelto.current = true;
+      // Se avisa al dominio para que deje de esperar, pero sin decirle por
+      // qué: el §19 pide no dar información de más a quien pregunta.
+      rechazar(peticion);
+      navigation.replace('NoVerificado', { motivo: 'E_SIN_SECRETO' });
+    });
+    return () => { vivo = false; };
+  }, [entrega, peticion, navigation]);
 
   // La caducidad la fija el dominio; al llegar a cero no se aprueba nada.
   useEffect(() => {
@@ -42,45 +71,76 @@ export default function Aprobacion({ navigation, route }: Props) {
     return `${Math.floor(q / 60)}:${String(q % 60).padStart(2, '0')}`;
   }, [restante]);
 
+  /**
+   * §9 y §10 — emparejar: se prueba la posesión de la clave y el dominio
+   * entrega, ahí mismo, el secreto que guardará esta app.
+   */
+  const emparejar = async () => {
+    // §7 y §9 — la prueba de posesión se firma en el chip y se envía junto
+    // con la identidad de la app. Sin ella, el dominio no puede saber que
+    // esta clave pública la controla quien la presenta.
+    const { proof, app_id } = await pruebaDePosesion(peticion, peticion.purpose);
+    const identidad = await Signing.identidad();
+
+    const { secret } = await responder(peticion, {
+      type: 'APP_IDENTITY',
+      version: 1,
+      app_id,
+      app_public_key: identidad.clavePublicaSpkiB64,
+      app_encryption_key: identidad.clavePublicaCifradoSpkiB64,
+      proof_of_possession: proof,
+    });
+
+    resuelto.current = true;
+
+    // §10 — el secreto llega cifrado en la propia respuesta al emparejamiento.
+    // Se abre DENTRO del chip y se guarda ligado a la identidad del dominio.
+    // Pide autenticación otra vez: firmar y descifrar son dos operaciones
+    // distintas del Keystore, cada una con su propio permiso.
+    let secretoRecibido = false;
+    if (secret) {
+      const claro = await abrirSecreto(secret, peticion);
+      await guardar({
+        domain: peticion.domain,
+        domain_id: peticion.domain_id,
+        domain_public_key: peticion.domain_public_key,
+        secreto: claro,
+      });
+      secretoRecibido = true;
+    }
+
+    return { firmaDerB64: proof, keyId: app_id, secretoRecibido, secretoEntregado: false };
+  };
+
+  /**
+   * §14 — devolver: el secreto sale de la bóveda, se firma y se cifra para
+   * este dominio. Nunca se pide al dominio; el dominio ya no lo tiene que
+   * mandar, solo comprobarlo.
+   */
+  const devolver = async () => {
+    if (!guardado) throw new PeticionInvalida('E_SIN_SECRETO', 'No hay secreto para este dominio.');
+    const { acuse, firmaDerB64, appId } = await entregarSecreto(peticion, guardado);
+    resuelto.current = true;
+    return {
+      firmaDerB64, keyId: appId,
+      secretoRecibido: false,
+      // El dominio confirma que descifró y que la firma era suya. Si dijera
+      // que no, el POST habría fallado con 403 y no llegaríamos aquí.
+      secretoEntregado: acuse.signature_valid !== false,
+    };
+  };
+
   const confirmar = async () => {
     setOcupado(true);
     try {
-      // §7 y §9 — la prueba de posesión se firma en el chip y se envía junto
-      // con la identidad de la app. Sin ella, el dominio no puede saber que
-      // esta clave pública la controla quien la presenta.
-      const { proof, app_id } = await pruebaDePosesion(peticion, peticion.purpose);
-      const identidad = await Signing.identidad();
-
-      const { secret } = await responder(peticion, {
-        type: 'APP_IDENTITY',
-        version: 1,
-        app_id,
-        app_public_key: identidad.clavePublicaSpkiB64,
-        app_encryption_key: identidad.clavePublicaCifradoSpkiB64,
-        proof_of_possession: proof,
-      });
-
-      resuelto.current = true;
-
-      // §10 — si el dominio entregó un secreto, se abre DENTRO del chip y se
-      // guarda. Pide autenticación otra vez: la firma y el descifrado son dos
-      // operaciones distintas del Keystore, cada una con su propio permiso.
-      let secretoRecibido = false;
-      if (secret) {
-        const claro = await abrirSecreto(secret, peticion);
-        await guardar({
-          domain: peticion.domain,
-          domain_id: peticion.domain_id,
-          secreto: claro,
-        });
-        secretoRecibido = true;
-      }
+      const r = entrega ? await devolver() : await emparejar();
 
       await anotar({ origen: peticion.domain, accion: peticion.action_texto, resultado: 'aprobado' });
       navigation.replace('Firmado', {
-        firmaDerB64: proof, keyId: app_id,
+        firmaDerB64: r.firmaDerB64, keyId: r.keyId,
         origen: peticion.domain, proposito: peticion.purpose,
-        secretoRecibido,
+        secretoRecibido: r.secretoRecibido,
+        secretoEntregado: r.secretoEntregado,
       });
     } catch (e: any) {
       if (e instanceof BiometriaCancelada) return; // puede reintentar
@@ -107,6 +167,13 @@ export default function Aprobacion({ navigation, route }: Props) {
         navigation.replace('NoVerificado', { motivo: e.codigo, detalle: e.message });
         return;
       }
+      // §14 — si el módulo nativo no pudo cifrar para este dominio, el motivo
+      // es concreto y merece pantalla propia: no se envió nada.
+      if (e?.code === 'E_CLAVE_DOMINIO' || e?.code === 'E_CIFRADO') {
+        resuelto.current = true;
+        navigation.replace('NoVerificado', { motivo: e.code, detalle: e.message });
+        return;
+      }
       Alert.alert('No se pudo aprobar', e?.message ?? 'Error desconocido.');
     } finally {
       setOcupado(false);
@@ -131,7 +198,7 @@ export default function Aprobacion({ navigation, route }: Props) {
 
       <ScrollView contentContainerStyle={s.cuerpo} showsVerticalScrollIndicator={false}>
         <Ceja style={{ marginBottom: 10 }}>
-          {peticion.purpose === 'PAIR' ? 'Quiere vincularse con tu teléfono' : 'Solicita tu aprobación'}
+          {entrega ? 'Te pide el secreto que le guardaste' : 'Quiere vincularse con tu teléfono'}
         </Ceja>
         <Origen style={{ marginBottom: 6 }}>{peticion.domain}</Origen>
         <Cuerpo style={{ marginBottom: 22 }}>
@@ -144,14 +211,24 @@ export default function Aprobacion({ navigation, route }: Props) {
           <Fila etiqueta="Identidad del sitio">
             <Text style={tipo.mono}>{peticion.domain_id.slice(0, 8)}··{peticion.domain_id.slice(-4)}</Text>
           </Fila>
+          {guardado ? (
+            <Fila etiqueta="Secreto guardado">
+              {new Date(guardado.recibidoEn).toLocaleDateString('es-PE', {
+                day: 'numeric', month: 'short', year: 'numeric',
+              })}
+            </Fila>
+          ) : null}
           <Fila etiqueta="Caduca en">
             <Text style={[tipo.mono, restante <= 30 && { color: color.carmin }]}>{reloj}</Text>
           </Fila>
         </Tarjeta>
 
         <Minima style={{ marginBottom: 14 }}>
-          Esto lo confirmó el propio sitio por conexión segura, no el código que escaneaste.
-          Tu aprobación queda ligada a esta petición y a ninguna otra.
+          {entrega
+            ? 'El secreto sale de este teléfono firmado con tu clave y cifrado para este dominio. '
+              + 'Solo él puede abrirlo, y solo sirve para esta petición.'
+            : 'Esto lo confirmó el propio sitio por conexión segura, no el código que escaneaste. '
+              + 'Tu aprobación queda ligada a esta petición y a ninguna otra.'}
         </Minima>
 
         {/* El código de verificación no se muestra de entrada: la mayoría no lo
@@ -184,8 +261,11 @@ export default function Aprobacion({ navigation, route }: Props) {
       </ScrollView>
 
       <View style={s.acciones}>
-        <Boton onPress={confirmar} cargando={ocupado} icono={<Check />}>
-          {peticion.purpose === 'PAIR' ? 'Vincular este dispositivo' : 'Aprobar'}
+        <Boton
+          onPress={confirmar}
+          cargando={ocupado || guardado === undefined}
+          icono={<Check />}>
+          {entrega ? 'Entregar el secreto' : 'Vincular este dispositivo'}
         </Boton>
         <Boton variante="peligro" onPress={denegar}>Rechazar</Boton>
       </View>

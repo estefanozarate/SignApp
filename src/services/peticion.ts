@@ -1,4 +1,5 @@
 import { Signing } from '../native/Signing';
+import type { SecretoGuardado } from './boveda';
 import { bytesAB64, textoABytes } from '../lib/aleatorio';
 import { b64ABytes } from '../lib/b64';
 
@@ -194,10 +195,27 @@ export type SecretoCifrado = {
   tag: string;
 };
 
+/**
+ * Lo que el dominio contesta al recibir la respuesta de la app.
+ *
+ * En un PAIR trae el secreto cifrado (§10). En un SECRET_REQUEST trae el
+ * veredicto del §14: si pudo descifrar, si la firma era válida y si el
+ * secreto coincide con el que entregó en su día.
+ */
+export type Acuse = {
+  ok?: boolean;
+  /** §10 — solo en el emparejamiento. */
+  secret?: SecretoCifrado;
+  /** §14 — solo al devolver el secreto. */
+  signature_valid?: boolean;
+  matches?: boolean;
+  secret_fingerprint?: string;
+};
+
 /** Entrega la respuesta al dominio, con el contexto de esta petición (§15). */
 export async function responder(
   p: Peticion, cuerpo: Record<string, unknown>,
-): Promise<{ secret?: SecretoCifrado }> {
+): Promise<Acuse> {
   let res: Response;
   try {
     res = await conTope(
@@ -214,10 +232,15 @@ export async function responder(
     throw new PeticionInvalida('E_RED', `No se pudo conectar con ${p.domain}.`);
   }
 
-  // §9: el dominio rechaza la prueba si no cuadra. Merece su propio motivo:
-  // significa que la firma no se pudo validar, no que haya fallado la red.
+  // §9 y §14: el dominio rechaza si la firma no cuadra. Merece su propio
+  // motivo: significa que no se pudo validar, no que haya fallado la red.
   if (res.status === 403) {
-    throw new PeticionInvalida('E_PRUEBA', 'El sitio no aceptó la prueba de identidad.');
+    throw new PeticionInvalida(
+      p.purpose === 'PAIR' ? 'E_PRUEBA' : 'E_FIRMA',
+      p.purpose === 'PAIR'
+        ? 'El sitio no aceptó la prueba de identidad.'
+        : 'El sitio no aceptó la firma de la respuesta.',
+    );
   }
   if (res.status === 409) throw new PeticionInvalida('E_USADA', 'El sitio ya recibió una respuesta.');
   if (res.status === 410) throw new PeticionInvalida('E_EXPIRADA', 'La petición caducó antes de enviarla.');
@@ -277,4 +300,106 @@ function textoDeB64(b64: string): string {
     }
   }
   return s;
+}
+
+// ── §14 la app devuelve el secreto, firmado y cifrado ───────────────────
+
+/**
+ * §14 — los campos de la respuesta. Son exactamente los que el documento
+ * enumera, y los que el dominio reconstruye para verificar la firma.
+ */
+export type RespuestaSecreto = {
+  version: 1;
+  request_id: string;
+  nonce: string;
+  domain_id: string;
+  app_id: string;
+  secret: string;
+};
+
+/**
+ * Serialización canónica de lo que se firma.
+ *
+ * No se firma el JSON: dos serializaciones del mismo objeto pueden diferir en
+ * el orden de las claves o en los espacios, y entonces la firma no verifica
+ * por un motivo que no tiene nada que ver con la seguridad. Se firma una
+ * cadena con los campos en orden fijo, unidos por 0x1f — el mismo separador
+ * que ya usa la prueba de posesión, y por la misma razón: no aparece en texto
+ * normal, así que no hay forma de que dos combinaciones distintas de campos
+ * produzcan la misma cadena.
+ *
+ * Que la firma cubra request_id y nonce es lo que impide el §15: una
+ * respuesta capturada de una petición anterior no vale para la siguiente.
+ * Que cubra domain_id impide el §16: la respuesta va dirigida a ESE dominio.
+ */
+export function canonicoDeLaRespuesta(r: RespuestaSecreto, domain: string): string {
+  return [
+    'sello/secreto/v1',
+    domain,
+    r.request_id,
+    r.nonce,
+    r.domain_id,
+    r.app_id,
+    r.secret,
+  ].join('\u001f');
+}
+
+/**
+ * §13 y §14 — firma el secreto guardado, lo cifra para el dominio y lo entrega.
+ *
+ * El orden importa: primero firmar, luego cifrar. Al revés, la firma quedaría
+ * fuera del sobre y cualquiera podría reenviarla con otro contenido.
+ *
+ * La firma ocurre dentro del chip y exige autenticación; el cifrado usa solo
+ * la clave pública del dominio, así que no pide nada. Un único prompt.
+ */
+export async function entregarSecreto(
+  p: Peticion, guardado: SecretoGuardado,
+): Promise<{ acuse: Acuse; firmaDerB64: string; appId: string }> {
+  // §13 — se vuelve a comprobar aquí, no solo en la pantalla. La bóveda pudo
+  // cambiar entre que se pintó la pantalla y que el usuario pulsó.
+  if (guardado.domain_id !== p.domain_id || guardado.domain_public_key !== p.domain_public_key) {
+    throw new PeticionInvalida(
+      'E_SIN_SECRETO', 'El secreto guardado no pertenece a este dominio.',
+    );
+  }
+
+  const identidad = await Signing.identidad();
+  const respuesta: RespuestaSecreto = {
+    version: 1,
+    request_id: p.request_id,
+    nonce: p.nonce,
+    domain_id: p.domain_id,
+    app_id: identidad.keyId,
+    secret: guardado.secreto,
+  };
+
+  const { firmaDerB64 } = await Signing.firmar(
+    bytesAB64(textoABytes(canonicoDeLaRespuesta(respuesta, p.domain))),
+    'Devolver tu secreto',
+    p.domain,
+  );
+
+  // El sobre lleva la respuesta Y su firma: el dominio no puede verificar
+  // nada hasta haberlo abierto con su clave privada.
+  const claro = JSON.stringify({ ...respuesta, signature: firmaDerB64 });
+  const sobre = await Signing.cerrarSobre(
+    p.domain_public_key, bytesAB64(textoABytes(claro)),
+  );
+
+  const acuse = await responder(p, {
+    type: 'SECRET_RESPONSE',
+    version: 1,
+    // Nombres en inglés, como el resto del protocolo del documento: este
+    // objeto lo lee el servidor, no la app.
+    envelope: {
+      alg: sobre.alg,
+      encrypted_key: sobre.claveEnvueltaB64,
+      iv: sobre.ivB64,
+      ciphertext: sobre.cifradoB64,
+      tag: sobre.tagB64,
+    },
+  });
+
+  return { acuse, firmaDerB64, appId: identidad.keyId };
 }
