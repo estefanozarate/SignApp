@@ -39,8 +39,9 @@ import javax.crypto.spec.SecretKeySpec
  *   - EC P-256 (PURPOSE_SIGN) para firmar: identidad, prueba de posesión y
  *     aprobaciones. Autenticación por operación (CryptoObject).
  *   - RSA-2048 (PURPOSE_DECRYPT, OAEP-SHA256) para recibir secretos cifrados
- *     por el dominio. SIN autenticación — ver generarCifrado() y §10.1 de
- *     diseno_app.md para el porqué.
+ *     por el dominio. SIN autenticación, y SIEMPRE en TEE, nunca StrongBox —
+ *     ver generarCifrado() y §10.1 de diseno_app.md para el porqué de cada
+ *     una de las dos cosas.
  *   - AES-256-GCM (`sello.boveda.v1`) para la bóveda local. Autenticación
  *     por ventana de validez de diez segundos — ver generarBoveda().
  *
@@ -48,10 +49,11 @@ import javax.crypto.spec.SecretKeySpec
  * sobre todo, porque BiometricPrompt.CryptoObject no admite KeyAgreement: la
  * clave de acuerdo solo puede protegerse con una VENTANA DE TIEMPO, no por
  * operación. RSA usa Cipher, que sí entra en CryptoObject — pero en este
- * keymaster concreto (Samsung SM-T545) el descifrado RSA con clave ligada a
- * autenticación falla siempre, por operación o por ventana (§10.1). Por eso
- * la clave RSA ya no pide autenticación en absoluto: la garantía que el
- * diseño original le pedía a *ese paso* se movió a la bóveda.
+ * keymaster concreto (Samsung SM-T545) el descifrado RSA-OAEP falla tanto con
+ * clave ligada a autenticación (§10.1) como, según se comprobó después, con
+ * clave en StrongBox — con o sin autenticación de por medio. Por eso la clave
+ * RSA ya no pide autenticación y además fuerza TEE: dos ajustes distintos,
+ * cada uno resuelto por su propia evidencia de diagnóstico.
  *
  * Ninguna privada cruza el puente a JavaScript: por aquí salen firmas, claves
  * públicas y texto en claro ya descifrado.
@@ -151,14 +153,14 @@ class SigningModule(private val ctx: ReactApplicationContext) : ReactContextBase
                 generar(keyId, strongBox = false); false
             }
 
-            // Las otras dos van aparte: ni RSA ni AES en StrongBox están en
-            // todos los chips, así que cada una se intenta y cae al TEE sin
-            // arrastrar a las demás.
-            try {
-                generarCifrado(strongBox = true)
-            } catch (e: Exception) {
-                generarCifrado(strongBox = false)
-            }
+            // La de cifrado va SIEMPRE en TEE, nunca StrongBox — ver el doc de
+            // generarCifrado(). Con clave en TEE la generación no lanza y el
+            // problema solo se vería al descifrar más tarde, así que probar
+            // "generar en StrongBox y caer al TEE si falla" no habría servido
+            // aquí: la generación en StrongBox tampoco falla en este chip, es
+            // el descifrado el que rompe. Se evita StrongBox directamente.
+            generarCifrado()
+
             try {
                 generarBoveda(strongBox = true)
             } catch (e: Exception) {
@@ -236,6 +238,19 @@ class SigningModule(private val ctx: ReactApplicationContext) : ReactContextBase
      * IllegalBlockSizeException que envuelve un KeyStoreException "Unknown
      * error", sin más detalle.
      *
+     * SEGUNDO HALLAZGO, posterior al de la autenticación: quitar la
+     * autenticación no bastó. La clave real, ya SIN autenticación, seguía
+     * fallando con el mismo error — mientras que la clave temporal de
+     * diagnosticarOaep(), también sin autenticación, funcionaba. La
+     * diferencia entre las dos: esta función intentaba StrongBox primero, y
+     * como la generación en StrongBox no lanza excepción en este chip (el
+     * fallo solo aparece al descifrar, no al generar), la clave real
+     * terminaba en StrongBox sin que el try/catch lo detectara. La prueba
+     * añadida a diagnosticarOaep() con una clave temporal EN StrongBox lo
+     * confirmó: incluso sin autenticación, el descifrado RSA-OAEP con clave
+     * en StrongBox falla en este keymaster. Por eso esta función ya no
+     * intenta StrongBox en absoluto: siempre TEE.
+     *
      * La autenticación real de este flujo no desaparece: se mueve a la
      * bóveda (generarBoveda()). Lo que gana quien fuerce abrirSobre() con el
      * teléfono desbloqueado es el secreto de un sitio nuevo que la propia
@@ -247,11 +262,7 @@ class SigningModule(private val ctx: ReactApplicationContext) : ReactContextBase
      * lanza "Unsupported MGF1 digest". El emisor tiene que cifrar con esa
      * misma combinación. Ver abrirSobre().
      */
-    private fun generarCifrado(strongBox: Boolean) {
-        if (strongBox && Build.VERSION.SDK_INT < Build.VERSION_CODES.P) {
-            throw UnsupportedOperationException("StrongBox exige API 28+")
-        }
-
+    private fun generarCifrado() {
         val spec = KeyGenParameterSpec.Builder(ALIAS_CIFRADO, KeyProperties.PURPOSE_DECRYPT)
             .setKeySize(2048)
             // Los DOS digests. El de OAEP es SHA-256, pero MGF1 usa SHA-1 y el
@@ -260,9 +271,7 @@ class SigningModule(private val ctx: ReactApplicationContext) : ReactContextBase
             // no dice nada de la causa real.
             .setDigests(KeyProperties.DIGEST_SHA256, KeyProperties.DIGEST_SHA1)
             .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_RSA_OAEP)
-            .apply {
-                if (strongBox) setIsStrongBoxBacked(true)
-            }
+            // Deliberadamente SIN setIsStrongBoxBacked: ver el doc de arriba.
             .build()
 
         KeyPairGenerator.getInstance(KeyProperties.KEY_ALGORITHM_RSA, ANDROID_KEYSTORE)
@@ -288,6 +297,11 @@ class SigningModule(private val ctx: ReactApplicationContext) : ReactContextBase
      * el usuario nota un solo gesto — aunque firmar() siga pidiendo su
      * propia autenticación por operación para la clave EC, que es un
      * mecanismo distinto y no se ha tocado.
+     *
+     * A diferencia de la clave RSA, esta SÍ intenta StrongBox primero: el
+     * hallazgo de generarCifrado() fue específico de RSA-OAEP en este chip,
+     * no una prohibición general de StrongBox. probarBoveda() mide esto en
+     * vivo para AES-GCM con autenticación antes de confiar en el supuesto.
      */
     private fun generarBoveda(strongBox: Boolean) {
         if (strongBox && Build.VERSION.SDK_INT < Build.VERSION_CODES.P) {
@@ -405,24 +419,26 @@ class SigningModule(private val ctx: ReactApplicationContext) : ReactContextBase
 
     /**
      * Prueba, contra este mismo chip, qué combinaciones de OAEP funcionan de
-     * verdad.
+     * verdad — y, desde el segundo hallazgo de generarCifrado(), si StrongBox
+     * es también parte del problema.
      *
      * El keymaster devuelve KM_ERROR_UNKNOWN_ERROR para cualquier fallo
      * interno, así que desde fuera no hay forma de distinguir "este digest no
-     * me lo soporta el TEE" de "la autenticación no se aplicó bien". Esto lo
-     * separa: genera una clave temporal con los MISMOS parámetros pero SIN
-     * autenticación de usuario, y cifra y descifra contra ella con cada
-     * variante.
+     * me lo soporta el TEE" de "la autenticación no se aplicó bien" de "es
+     * StrongBox el que falla". Esto los separa uno por uno: genera claves
+     * temporales variando un solo parámetro cada vez — sin autenticación en
+     * el TEE primero, y sin autenticación en StrongBox después — y cifra y
+     * descifra contra cada una.
      *
-     * En la SM-T545 el resultado fue concluyente: OAEP-SHA256/MGF1-SHA1
-     * FUNCIONA sin autenticación. La clave real, con autenticación, fallaba
-     * — de ahí que generarCifrado() haya dejado de pedirla (§10.1). Esta
-     * función queda como diagnóstico de regresión: si el mismo síntoma
-     * volviera a aparecer, dice si el problema está en el padding/digest o
-     * en otra parte.
+     * En la SM-T545 el resultado fue: OAEP-SHA256/MGF1-SHA1 en el TEE, sin
+     * autenticación, FUNCIONA — de ahí que generarCifrado() la dejara de
+     * pedir (§10.1). La misma combinación EN STRONGBOX, también sin
+     * autenticación, FALLA con el mismo error genérico — de ahí que
+     * generarCifrado() además dejara de usar StrongBox. Dos hallazgos
+     * distintos, cada uno con su propia clave temporal de control.
      *
-     * La clave temporal se borra al terminar. Es diagnóstico, no camino de
-     * producción: no cifra nada real ni toca las claves de la identidad.
+     * Las claves temporales se borran al terminar. Es diagnóstico, no camino
+     * de producción: no cifra nada real ni toca las claves de la identidad.
      */
     private fun diagnosticarOaep() {
         try {
@@ -451,11 +467,11 @@ class SigningModule(private val ctx: ReactApplicationContext) : ReactContextBase
             )
             val dato = ByteArray(32).also { SecureRandom().nextBytes(it) }
 
-            fun probar(nombre: String, transformacion: String, spec: OAEPParameterSpec?) {
+            fun probar(nombre: String, transformacion: String, spec: OAEPParameterSpec?, publicaProbar: java.security.PublicKey = publica) {
                 try {
                     val cifrador = Cipher.getInstance(transformacion).apply {
-                        if (spec != null) init(Cipher.ENCRYPT_MODE, publica, spec)
-                        else init(Cipher.ENCRYPT_MODE, publica)
+                        if (spec != null) init(Cipher.ENCRYPT_MODE, publicaProbar, spec)
+                        else init(Cipher.ENCRYPT_MODE, publicaProbar)
                     }
                     val ct = cifrador.doFinal(dato)
                     val descifrador = Cipher.getInstance(transformacion).apply {
@@ -473,7 +489,7 @@ class SigningModule(private val ctx: ReactApplicationContext) : ReactContextBase
             }
 
             val d = PSource.PSpecified.DEFAULT
-            Log.i("SelloSigning", "diag ── clave temporal SIN autenticación ──")
+            Log.i("SelloSigning", "diag ── clave temporal SIN autenticación, TEE ──")
             probar("OAEP-SHA256 / MGF1-SHA1 (spec)", "RSA/ECB/OAEPPadding",
                 OAEPParameterSpec("SHA-256", "MGF1", MGF1ParameterSpec.SHA1, d))
             probar("OAEP-SHA256 / MGF1-SHA256 (spec)", "RSA/ECB/OAEPPadding",
@@ -486,6 +502,63 @@ class SigningModule(private val ctx: ReactApplicationContext) : ReactContextBase
                 "RSA/ECB/OAEPWithSHA-1AndMGF1Padding", null)
 
             ks2.deleteEntry(ALIAS_DIAG)
+
+            // Segunda ronda: misma combinación ganadora (OAEP-SHA256/MGF1-SHA1,
+            // sin autenticación), pero con la clave en StrongBox. Si el equipo
+            // no tiene StrongBox, se salta sin más.
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                try {
+                    if (ks2.containsAlias(ALIAS_DIAG)) ks2.deleteEntry(ALIAS_DIAG)
+                    KeyPairGenerator.getInstance(KeyProperties.KEY_ALGORITHM_RSA, ANDROID_KEYSTORE)
+                        .apply {
+                            initialize(
+                                KeyGenParameterSpec.Builder(ALIAS_DIAG, KeyProperties.PURPOSE_DECRYPT)
+                                    .setKeySize(2048)
+                                    .setDigests(KeyProperties.DIGEST_SHA256, KeyProperties.DIGEST_SHA1)
+                                    .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_RSA_OAEP)
+                                    .setIsStrongBoxBacked(true)
+                                    .build(),
+                            )
+                        }
+                        .generateKeyPair()
+
+                    val ks3 = keystore()
+                    val privadaSb = (ks3.getEntry(ALIAS_DIAG, null) as KeyStore.PrivateKeyEntry).privateKey
+                    val publicaSb = KeyFactory.getInstance("RSA").generatePublic(
+                        X509EncodedKeySpec(ks3.getCertificate(ALIAS_DIAG).publicKey.encoded),
+                    )
+
+                    Log.i("SelloSigning", "diag ── clave temporal SIN autenticación, StrongBox ──")
+                    try {
+                        val cifrador = Cipher.getInstance("RSA/ECB/OAEPPadding").apply {
+                            init(
+                                Cipher.ENCRYPT_MODE, publicaSb,
+                                OAEPParameterSpec("SHA-256", "MGF1", MGF1ParameterSpec.SHA1, d),
+                            )
+                        }
+                        val ct = cifrador.doFinal(dato)
+                        val descifrador = Cipher.getInstance("RSA/ECB/OAEPPadding").apply {
+                            init(
+                                Cipher.DECRYPT_MODE, privadaSb,
+                                OAEPParameterSpec("SHA-256", "MGF1", MGF1ParameterSpec.SHA1, d),
+                            )
+                        }
+                        val claro = descifrador.doFinal(ct)
+                        Log.i(
+                            "SelloSigning",
+                            "diag OAEP-SHA256 / MGF1-SHA1, StrongBox: ${if (claro.contentEquals(dato)) "FUNCIONA" else "descifra pero no coincide"}",
+                        )
+                    } catch (e: Exception) {
+                        Log.w("SelloSigning", "diag OAEP-SHA256 / MGF1-SHA1, StrongBox: ${causaDe(e)}")
+                    }
+
+                    ks3.deleteEntry(ALIAS_DIAG)
+                } catch (e: Exception) {
+                    // Si el equipo dice tener StrongBox pero la generación en sí
+                    // falla, es un dato distinto y también vale la pena verlo.
+                    Log.w("SelloSigning", "diag StrongBox: no se pudo generar la clave temporal: ${causaDe(e)}")
+                }
+            }
         } catch (e: Exception) {
             Log.w("SelloSigning", "no se pudo diagnosticar: ${causaDe(e)}")
         }
@@ -842,10 +915,10 @@ class SigningModule(private val ctx: ReactApplicationContext) : ReactContextBase
             // el camino. No se devuelve nada a medias.
             promesa.reject("E_ALTERADO", "El secreto llegó alterado.", e)
         } catch (e: Exception) {
-            // Ya no debería pasar por un problema de autenticación — era
-            // justo el fallo que este cambio corrige — pero si algo más
-            // rompe esta combinación de parámetros, el diagnóstico de
-            // siempre sigue disponible.
+            // Ya no debería pasar por autenticación ni por StrongBox — eran
+            // justo los dos fallos que este código corrige — pero si algo más
+            // rompe esta combinación de parámetros, el diagnóstico de siempre
+            // sigue disponible.
             promesa.reject("E_DESCIFRADO", fallo("abrirSobre", e), e)
             Thread { diagnosticarOaep() }.start()
         } finally {
