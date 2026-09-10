@@ -48,6 +48,13 @@ export type Identidad = {
   clavePublicaCifradoSpkiB64?: string;
   /** MGF1 va con SHA-1 aunque el hash de OAEP sea SHA-256: el Keystore no admite otra cosa. */
   algoritmoCifrado?: 'RSA-OAEP-256-MGF1SHA1';
+  /**
+   * true: cada descifrado exige autenticación (§10 en su forma fuerte).
+   * false: el equipo no tiene biometría fuerte y la clave usa una ventana de
+   * validez de un segundo. Sigue exigiendo autenticación, pero no una por
+   * operación.
+   */
+  cifradoPorOperacion?: boolean;
   strongBox: boolean;
   creadaEn: number;
   /** Cadena de key attestation para que un verificador compruebe el origen hardware. */

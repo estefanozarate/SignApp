@@ -61,12 +61,20 @@ class SigningModule(private val ctx: ReactApplicationContext) : ReactContextBase
         const val PREF_KEY_ID = "key_id"
         const val PREF_CREADA = "creada_en"
         const val PREF_STRONGBOX = "strongbox"
+        const val PREF_POR_OPERACION = "cifrado_por_operacion"
         const val ANDROID_KEYSTORE = "AndroidKeyStore"
         // Biometría fuerte (Class 3) o la credencial del dispositivo (PIN/patrón).
         // El rostro Class 2 queda fuera a propósito: Android prohíbe usarlo con
         // CryptoObject, porque una biometría débil no puede custodiar una clave.
         val AUTENTICADORES = BiometricManager.Authenticators.BIOMETRIC_STRONG or
             BiometricManager.Authenticators.DEVICE_CREDENTIAL
+
+        /**
+         * Segundos de validez de la clave de cifrado en equipos SIN biometría
+         * fuerte. Ver generarCifrado(): es una degradación consciente del §10,
+         * y por eso el valor es el mínimo que el sistema acepta.
+         */
+        const val VENTANA_SIN_BIOMETRIA = 1
     }
 
     private val prefs by lazy { ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE) }
@@ -74,7 +82,7 @@ class SigningModule(private val ctx: ReactApplicationContext) : ReactContextBase
     private fun keystore(): KeyStore =
         KeyStore.getInstance(ANDROID_KEYSTORE).apply { load(null) }
 
-    // ── consulta ───────────────────────────────────────────
+    // ── consulta ──────────────────────
 
     @ReactMethod
     fun tieneIdentidad(promesa: Promise) {
@@ -99,7 +107,7 @@ class SigningModule(private val ctx: ReactApplicationContext) : ReactContextBase
         }
     }
 
-    // ── creación ──────────────────────────────────────────
+    // ── creación ─────────────────────
 
     /**
      * EC P-256, PURPOSE_SIGN, no exportable. Se intenta primero en StrongBox
@@ -200,6 +208,23 @@ class SigningModule(private val ctx: ReactApplicationContext) : ReactContextBase
      * hash de OAEP sea SHA-256. Lo comprobamos en hardware: con MGF1-SHA256
      * lanza "Unsupported MGF1 digest". El emisor tiene que cifrar con esa
      * misma combinación. Ver abrirSobre().
+     *
+     * Y la parte incómoda: la autenticación POR OPERACIÓN (timeout 0) solo se
+     * pide si hay biometría fuerte. Sin ella, el único autenticador válido es
+     * la credencial del dispositivo — el rostro Class 2 no vale para
+     * CryptoObject — y el keymaster de algunos equipos acepta ese token para
+     * firmar con ECDSA pero lo rechaza al descifrar con RSA, con un
+     * KM_ERROR_UNKNOWN_ERROR que no explica nada. Lo medimos en una Samsung
+     * SM-T545: la misma clave sin autenticación descifra sin problema.
+     *
+     * En esos equipos la clave pasa a una ventana de validez de
+     * VENTANA_SIN_BIOMETRIA segundos en vez de por operación. Es una
+     * degradación real del §10 y conviene llamarla por su nombre: dentro de
+     * esa ventana, la clave puede usarse sin un prompt nuevo. Se acepta porque
+     * la alternativa era que ningún equipo sin huella pudiera recibir
+     * secretos, y porque los equipos que SÍ tienen biometría fuerte conservan
+     * la garantía intacta. identidad() lo publica en cifradoPorOperacion para
+     * que la app pueda decir con cuál de las dos está funcionando.
      */
     private fun generarCifrado(strongBox: Boolean) {
         if (strongBox && Build.VERSION.SDK_INT < Build.VERSION_CODES.P) {
@@ -225,16 +250,22 @@ class SigningModule(private val ctx: ReactApplicationContext) : ReactContextBase
                 }
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
                     setUserAuthenticationParameters(
-                        0,
-                        KeyProperties.AUTH_BIOMETRIC_STRONG or KeyProperties.AUTH_DEVICE_CREDENTIAL,
+                        if (hayBiometriaFuerte) 0 else VENTANA_SIN_BIOMETRIA,
+                        if (hayBiometriaFuerte) KeyProperties.AUTH_BIOMETRIC_STRONG
+                        else KeyProperties.AUTH_DEVICE_CREDENTIAL,
                     )
-                } else {
+                } else if (hayBiometriaFuerte) {
                     @Suppress("DEPRECATION")
                     setUserAuthenticationValidityDurationSeconds(-1)
+                } else {
+                    @Suppress("DEPRECATION")
+                    setUserAuthenticationValidityDurationSeconds(VENTANA_SIN_BIOMETRIA)
                 }
                 if (strongBox) setIsStrongBoxBacked(true)
             }
             .build()
+
+        prefs.edit().putBoolean(PREF_POR_OPERACION, hayBiometriaFuerte).apply()
 
         KeyPairGenerator.getInstance(KeyProperties.KEY_ALGORITHM_RSA, ANDROID_KEYSTORE)
             .apply { initialize(spec) }
@@ -269,12 +300,15 @@ class SigningModule(private val ctx: ReactApplicationContext) : ReactContextBase
                 putString("algoritmoCifrado", "RSA-OAEP-256-MGF1SHA1")
             }
             putBoolean("strongBox", prefs.getBoolean(PREF_STRONGBOX, false))
+            // Qué garantiza de verdad este equipo al descifrar. La app debería
+            // poder decirlo, no dar por hecho lo que se pidió al generar.
+            putBoolean("cifradoPorOperacion", prefs.getBoolean(PREF_POR_OPERACION, true))
             putDouble("creadaEn", prefs.getLong(PREF_CREADA, 0L).toDouble())
             putArray("attestationB64", attestation)
         }
     }
 
-    // ── diagnóstico ───────────────────────────────
+    // ── diagnóstico ───────────────────────
 
     /**
      * El AndroidKeyStore envuelve casi todos sus fallos en excepciones
@@ -335,11 +369,9 @@ class SigningModule(private val ctx: ReactApplicationContext) : ReactContextBase
      * autenticación de usuario, y cifra y descifra contra ella con cada
      * variante.
      *
-     * Así la lectura es directa:
-     *   - si fallan las variantes con SHA-256, es que el TEE no las soporta
-     *     aunque acepte declararlas al generar la clave;
-     *   - si funcionan todas, el problema no es OAEP sino la autenticación
-     *     por operación de la clave real.
+     * En la SM-T545 el resultado fue concluyente: OAEP-SHA256/MGF1-SHA1
+     * FUNCIONA sin autenticación y falla con ella. De ahí la ventana de
+     * validez de generarCifrado().
      *
      * La clave temporal se borra al terminar. Es diagnóstico, no camino de
      * producción: no cifra nada real ni toca las claves de la identidad.
@@ -411,7 +443,7 @@ class SigningModule(private val ctx: ReactApplicationContext) : ReactContextBase
         }
     }
 
-    // ── firma ─────────────────────────────────
+    // ── firma ─────────────────────
 
     /**
      * El reto llega en base64 y se firma dentro del chip. El texto del prompt
@@ -492,7 +524,7 @@ class SigningModule(private val ctx: ReactApplicationContext) : ReactContextBase
         }
     }
 
-    // ── descifrado ────────────────────────────────
+    // ── descifrado ──────────────────────
 
     /**
      * §10 — abre un sobre cifrado híbrido, todo dentro del módulo nativo.
@@ -572,9 +604,11 @@ class SigningModule(private val ctx: ReactApplicationContext) : ReactContextBase
                     override fun onAuthenticationSucceeded(resultado: BiometricPrompt.AuthenticationResult) {
                         var claveAes: ByteArray? = null
                         try {
-                            // Solo el Cipher que salió del CryptoObject está desbloqueado.
-                            val c = resultado.cryptoObject?.cipher
-                                ?: throw IllegalStateException("El prompt no devolvió el cifrador vinculado.")
+                            // Con autenticación por operación, el Cipher desbloqueado
+                            // es el que sale del CryptoObject. Con ventana de validez
+                            // no hay CryptoObject: lo que desbloquea la clave es la
+                            // autenticación reciente, y vale la instancia de fuera.
+                            val c = resultado.cryptoObject?.cipher ?: cipher
 
                             // 1. La clave AES se desenvuelve DENTRO del chip.
                             claveAes = c.doFinal(claveEnvuelta)
@@ -625,19 +659,38 @@ class SigningModule(private val ctx: ReactApplicationContext) : ReactContextBase
                 },
             )
 
+            // Con ventana de validez, la clave NO admite CryptoObject: hay que
+            // autenticar a secas y usar la instancia de Cipher normal. Pasarle
+            // el CryptoObject haría fallar el propio prompt.
+            val porOperacion = prefs.getBoolean(PREF_POR_OPERACION, true)
+
             val info = BiometricPrompt.PromptInfo.Builder()
                 .setTitle(titulo)
                 .setSubtitle(subtitulo)
                 .setDescription("Se abre dentro del chip seguro. La clave no sale del teléfono.")
-                .setAllowedAuthenticators(AUTENTICADORES)
+                // Los autenticadores del prompt tienen que coincidir con los que
+                // autoriza la clave. Si la clave es solo biométrica y el prompt
+                // ofrece el PIN, el usuario puede elegir una vía que el chip
+                // luego rechaza — y el error no dice que fuera por eso.
+                .setAllowedAuthenticators(
+                    if (porOperacion) {
+                        BiometricManager.Authenticators.BIOMETRIC_STRONG
+                    } else {
+                        BiometricManager.Authenticators.DEVICE_CREDENTIAL
+                    },
+                )
                 .setConfirmationRequired(true)
                 .build()
 
-            prompt.authenticate(info, BiometricPrompt.CryptoObject(cipher))
+            if (porOperacion) {
+                prompt.authenticate(info, BiometricPrompt.CryptoObject(cipher))
+            } else {
+                prompt.authenticate(info)
+            }
         }
     }
 
-    // ── cifrado ───────────────────────────────
+    // ── cifrado ─────────────────────
 
     /**
      * §14 — cierra un sobre cifrado para el dominio. El inverso de abrirSobre().
@@ -731,7 +784,7 @@ class SigningModule(private val ctx: ReactApplicationContext) : ReactContextBase
         }
     }
 
-    // ── borrado ───────────────────────────────
+    // ── borrado ─────────────────────
 
     @ReactMethod
     fun borrarIdentidad(promesa: Promise) {
