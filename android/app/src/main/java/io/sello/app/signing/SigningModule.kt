@@ -6,6 +6,7 @@ import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyInfo
 import android.security.keystore.KeyPermanentlyInvalidatedException
 import android.security.keystore.KeyProperties
+import android.security.keystore.UserNotAuthenticatedException
 import android.util.Base64
 import android.util.Log
 import androidx.biometric.BiometricManager
@@ -24,6 +25,7 @@ import java.security.spec.MGF1ParameterSpec
 import java.security.spec.X509EncodedKeySpec
 import java.util.UUID
 import javax.crypto.Cipher
+import javax.crypto.KeyGenerator
 import javax.crypto.spec.GCMParameterSpec
 import javax.crypto.spec.OAEPParameterSpec
 import javax.crypto.spec.PSource
@@ -32,19 +34,24 @@ import javax.crypto.spec.SecretKeySpec
 /**
  * Identidad criptográfica del dispositivo.
  *
- * Son DOS claves, y la separación no es capricho:
+ * Son TRES claves, y la separación no es capricho:
  *
  *   - EC P-256 (PURPOSE_SIGN) para firmar: identidad, prueba de posesión y
- *     aprobaciones.
+ *     aprobaciones. Autenticación por operación (CryptoObject).
  *   - RSA-2048 (PURPOSE_DECRYPT, OAEP-SHA256) para recibir secretos cifrados
- *     por el dominio.
+ *     por el dominio. SIN autenticación — ver generarCifrado() y §10.1 de
+ *     diseno_app.md para el porqué.
+ *   - AES-256-GCM (`sello.boveda.v1`) para la bóveda local. Autenticación
+ *     por ventana de validez de diez segundos — ver generarBoveda().
  *
  * Se descartó ECDH con una sola clave porque PURPOSE_AGREE_KEY exige API 31 y,
  * sobre todo, porque BiometricPrompt.CryptoObject no admite KeyAgreement: la
  * clave de acuerdo solo puede protegerse con una VENTANA DE TIEMPO, no por
- * operación. RSA usa Cipher, que sí entra en CryptoObject, así que cada
- * descifrado sigue exigiendo autenticación explícita — que es la propiedad
- * sobre la que se apoya todo este diseño.
+ * operación. RSA usa Cipher, que sí entra en CryptoObject — pero en este
+ * keymaster concreto (Samsung SM-T545) el descifrado RSA con clave ligada a
+ * autenticación falla siempre, por operación o por ventana (§10.1). Por eso
+ * la clave RSA ya no pide autenticación en absoluto: la garantía que el
+ * diseño original le pedía a *ese paso* se movió a la bóveda.
  *
  * Ninguna privada cruza el puente a JavaScript: por aquí salen firmas, claves
  * públicas y texto en claro ya descifrado.
@@ -56,12 +63,13 @@ class SigningModule(private val ctx: ReactApplicationContext) : ReactContextBase
     private companion object {
         const val ALIAS = "sello.identidad.v1"
         const val ALIAS_CIFRADO = "sello.cifrado.v1"
+        const val ALIAS_BOVEDA = "sello.boveda.v1"
         const val ALIAS_DIAG = "sello.diagnostico.v1"
+        const val ALIAS_DIAG_BOVEDA = "sello.diagnostico.boveda.v1"
         const val PREFS = "sello.identidad"
         const val PREF_KEY_ID = "key_id"
         const val PREF_CREADA = "creada_en"
         const val PREF_STRONGBOX = "strongbox"
-        const val PREF_POR_OPERACION = "cifrado_por_operacion"
         const val ANDROID_KEYSTORE = "AndroidKeyStore"
         // Biometría fuerte (Class 3) o la credencial del dispositivo (PIN/patrón).
         // El rostro Class 2 queda fuera a propósito: Android prohíbe usarlo con
@@ -70,16 +78,18 @@ class SigningModule(private val ctx: ReactApplicationContext) : ReactContextBase
             BiometricManager.Authenticators.DEVICE_CREDENTIAL
 
         /**
-         * Segundos de validez de la clave de cifrado en equipos SIN biometría
-         * fuerte. Ver generarCifrado(): es una degradación consciente del §10.
+         * Segundos de validez de la clave de la bóveda (§10.1).
          *
          * Empezó siendo 1, por no debilitar la garantía más de lo justo, y no
-         * funcionaba: entre que el usuario teclea el PIN y llega el doFinal
-         * pasan cerca de dos segundos, así que la ventana expiraba antes de la
-         * operación. Diez da unas cinco veces ese margen sin dejar la clave
-         * utilizable durante un rato largo.
+         * funcionaba para la clave de cifrado RSA original: entre que el
+         * usuario teclea el PIN y llega el doFinal pasan cerca de dos
+         * segundos, así que la ventana expiraba antes de la operación. Diez
+         * da unas cinco veces ese margen sin dejar la clave utilizable
+         * durante un rato largo, y es de sobra para que autenticar() → leer
+         * la bóveda → firmar() ocurran uno detrás de otro sin que el usuario
+         * note más que un gesto.
          */
-        const val VENTANA_SIN_BIOMETRIA = 10
+        const val VENTANA_BOVEDA_S = 10
     }
 
     private val prefs by lazy { ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE) }
@@ -130,6 +140,7 @@ class SigningModule(private val ctx: ReactApplicationContext) : ReactContextBase
             val ks = keystore()
             if (ks.containsAlias(ALIAS)) ks.deleteEntry(ALIAS)
             if (ks.containsAlias(ALIAS_CIFRADO)) ks.deleteEntry(ALIAS_CIFRADO)
+            if (ks.containsAlias(ALIAS_BOVEDA)) ks.deleteEntry(ALIAS_BOVEDA)
 
             val keyId = UUID.randomUUID().toString()
             // StrongBox primero; si el equipo no lo tiene, TEE. Si ambos fallan se
@@ -140,12 +151,18 @@ class SigningModule(private val ctx: ReactApplicationContext) : ReactContextBase
                 generar(keyId, strongBox = false); false
             }
 
-            // La de cifrado va aparte: RSA en StrongBox no está en todos los
-            // chips, así que se intenta y se cae al TEE sin arrastrar a la otra.
+            // Las otras dos van aparte: ni RSA ni AES en StrongBox están en
+            // todos los chips, así que cada una se intenta y cae al TEE sin
+            // arrastrar a las demás.
             try {
                 generarCifrado(strongBox = true)
             } catch (e: Exception) {
                 generarCifrado(strongBox = false)
+            }
+            try {
+                generarBoveda(strongBox = true)
+            } catch (e: Exception) {
+                generarBoveda(strongBox = false)
             }
 
             prefs.edit()
@@ -209,36 +226,31 @@ class SigningModule(private val ctx: ReactApplicationContext) : ReactContextBase
      * RSA-2048 para recibir secretos. 2048 y no 3072 porque solo envuelve una
      * clave AES y en el TEE la generación de 3072 tarda varios segundos.
      *
+     * §10.1 — SIN setUserAuthenticationRequired. diseno_app.md §10 nunca
+     * exigió autenticación en este paso concreto, solo que la privada no
+     * salga del dispositivo. En la SM-T545 el keymaster no descifra RSA con
+     * una clave ligada a autenticación: diagnosticarOaep() demuestra que la
+     * misma combinación OAEP-SHA256/MGF1-SHA1 funciona sobre una clave
+     * temporal sin autenticación y falla sobre una clave real con ella,
+     * tanto por operación como con ventana de validez — es un
+     * IllegalBlockSizeException que envuelve un KeyStoreException "Unknown
+     * error", sin más detalle.
+     *
+     * La autenticación real de este flujo no desaparece: se mueve a la
+     * bóveda (generarBoveda()). Lo que gana quien fuerce abrirSobre() con el
+     * teléfono desbloqueado es el secreto de un sitio nuevo que la propia
+     * app todavía no guardó — no el contenido de la bóveda, que sigue detrás
+     * de autenticar(). Ver §10.1 de diseno_app.md.
+     *
      * Ojo con OAEP: el AndroidKeyStore solo admite MGF1 con SHA-1, aunque el
      * hash de OAEP sea SHA-256. Lo comprobamos en hardware: con MGF1-SHA256
      * lanza "Unsupported MGF1 digest". El emisor tiene que cifrar con esa
      * misma combinación. Ver abrirSobre().
-     *
-     * Y la parte incómoda: la autenticación POR OPERACIÓN (timeout 0) solo se
-     * pide si hay biometría fuerte. Sin ella, el único autenticador válido es
-     * la credencial del dispositivo — el rostro Class 2 no vale para
-     * CryptoObject — y el keymaster de algunos equipos acepta ese token para
-     * firmar con ECDSA pero lo rechaza al descifrar con RSA, con un
-     * KM_ERROR_UNKNOWN_ERROR que no explica nada. Lo medimos en una Samsung
-     * SM-T545: la misma clave sin autenticación descifra sin problema.
-     *
-     * En esos equipos la clave pasa a una ventana de validez de
-     * VENTANA_SIN_BIOMETRIA segundos en vez de por operación. Es una
-     * degradación real del §10 y conviene llamarla por su nombre: dentro de
-     * esa ventana, la clave puede usarse sin un prompt nuevo. Se acepta porque
-     * la alternativa era que ningún equipo sin huella pudiera recibir
-     * secretos, y porque los equipos que SÍ tienen biometría fuerte conservan
-     * la garantía intacta. identidad() lo publica en cifradoPorOperacion para
-     * que la app pueda decir con cuál de las dos está funcionando.
      */
     private fun generarCifrado(strongBox: Boolean) {
         if (strongBox && Build.VERSION.SDK_INT < Build.VERSION_CODES.P) {
             throw UnsupportedOperationException("StrongBox exige API 28+")
         }
-
-        val hayBiometriaFuerte = BiometricManager.from(ctx)
-            .canAuthenticate(BiometricManager.Authenticators.BIOMETRIC_STRONG) ==
-            BiometricManager.BIOMETRIC_SUCCESS
 
         val spec = KeyGenParameterSpec.Builder(ALIAS_CIFRADO, KeyProperties.PURPOSE_DECRYPT)
             .setKeySize(2048)
@@ -248,33 +260,64 @@ class SigningModule(private val ctx: ReactApplicationContext) : ReactContextBase
             // no dice nada de la causa real.
             .setDigests(KeyProperties.DIGEST_SHA256, KeyProperties.DIGEST_SHA1)
             .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_RSA_OAEP)
+            .apply {
+                if (strongBox) setIsStrongBoxBacked(true)
+            }
+            .build()
+
+        KeyPairGenerator.getInstance(KeyProperties.KEY_ALGORITHM_RSA, ANDROID_KEYSTORE)
+            .apply { initialize(spec) }
+            .generateKeyPair()
+    }
+
+    /**
+     * AES-256-GCM para la bóveda local (§10.1, §11). A diferencia de la
+     * clave de cifrado RSA, esta SÍ exige autenticación — es lo que hace que
+     * "revelar un secreto" (Boveda.tsx) y devolverlo (§14) sigan pidiendo
+     * algo real al usuario, ahora que abrirSobre() ya no lo hace.
+     *
+     * Usa ventana de validez fija de VENTANA_BOVEDA_S segundos, no
+     * autenticación por operación: autenticar() se llama una vez y, dentro
+     * de esa ventana, tanto cifrarEnBoveda() como descifrarDeBoveda()
+     * proceden sin pedir nada más. En un equipo solo-PIN como la SM-T545
+     * (DEVICE_CREDENTIAL es el único autenticador disponible: el rostro
+     * Class 2 no entra en CryptoObject ni en este esquema), una
+     * reconfirmación de PIN a los pocos segundos de la anterior la trata el
+     * propio sistema como ya satisfecha. Por eso entregarSecreto() puede
+     * encadenar autenticar() → leer la bóveda → firmar() y, en la práctica,
+     * el usuario nota un solo gesto — aunque firmar() siga pidiendo su
+     * propia autenticación por operación para la clave EC, que es un
+     * mecanismo distinto y no se ha tocado.
+     */
+    private fun generarBoveda(strongBox: Boolean) {
+        if (strongBox && Build.VERSION.SDK_INT < Build.VERSION_CODES.P) {
+            throw UnsupportedOperationException("StrongBox exige API 28+")
+        }
+
+        val spec = KeyGenParameterSpec.Builder(
+            ALIAS_BOVEDA, KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT,
+        )
+            .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
+            .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
+            .setKeySize(256)
             .setUserAuthenticationRequired(true)
             .apply {
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N && hayBiometriaFuerte) {
-                    setInvalidatedByBiometricEnrollment(true)
-                }
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
                     setUserAuthenticationParameters(
-                        if (hayBiometriaFuerte) 0 else VENTANA_SIN_BIOMETRIA,
-                        if (hayBiometriaFuerte) KeyProperties.AUTH_BIOMETRIC_STRONG
-                        else KeyProperties.AUTH_DEVICE_CREDENTIAL,
+                        VENTANA_BOVEDA_S,
+                        KeyProperties.AUTH_BIOMETRIC_STRONG or KeyProperties.AUTH_DEVICE_CREDENTIAL,
                     )
-                } else if (hayBiometriaFuerte) {
-                    @Suppress("DEPRECATION")
-                    setUserAuthenticationValidityDurationSeconds(-1)
                 } else {
                     @Suppress("DEPRECATION")
-                    setUserAuthenticationValidityDurationSeconds(VENTANA_SIN_BIOMETRIA)
+                    setUserAuthenticationValidityDurationSeconds(VENTANA_BOVEDA_S)
                 }
                 if (strongBox) setIsStrongBoxBacked(true)
             }
             .build()
 
-        prefs.edit().putBoolean(PREF_POR_OPERACION, hayBiometriaFuerte).apply()
-
-        KeyPairGenerator.getInstance(KeyProperties.KEY_ALGORITHM_RSA, ANDROID_KEYSTORE)
-            .apply { initialize(spec) }
-            .generateKeyPair()
+        KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, ANDROID_KEYSTORE)
+            .apply { init(spec) }
+            .generateKey()
     }
 
     /** Traduce el código de canAuthenticate a algo que el usuario pueda accionar. */
@@ -305,9 +348,6 @@ class SigningModule(private val ctx: ReactApplicationContext) : ReactContextBase
                 putString("algoritmoCifrado", "RSA-OAEP-256-MGF1SHA1")
             }
             putBoolean("strongBox", prefs.getBoolean(PREF_STRONGBOX, false))
-            // Qué garantiza de verdad este equipo al descifrar. La app debería
-            // poder decirlo, no dar por hecho lo que se pidió al generar.
-            putBoolean("cifradoPorOperacion", prefs.getBoolean(PREF_POR_OPERACION, true))
             putDouble("creadaEn", prefs.getLong(PREF_CREADA, 0L).toDouble())
             putArray("attestationB64", attestation)
         }
@@ -375,8 +415,11 @@ class SigningModule(private val ctx: ReactApplicationContext) : ReactContextBase
      * variante.
      *
      * En la SM-T545 el resultado fue concluyente: OAEP-SHA256/MGF1-SHA1
-     * FUNCIONA sin autenticación y falla con ella. De ahí la ventana de
-     * validez de generarCifrado().
+     * FUNCIONA sin autenticación. La clave real, con autenticación, fallaba
+     * — de ahí que generarCifrado() haya dejado de pedirla (§10.1). Esta
+     * función queda como diagnóstico de regresión: si el mismo síntoma
+     * volviera a aparecer, dice si el problema está en el padding/digest o
+     * en otra parte.
      *
      * La clave temporal se borra al terminar. Es diagnóstico, no camino de
      * producción: no cifra nada real ni toca las claves de la identidad.
@@ -445,6 +488,137 @@ class SigningModule(private val ctx: ReactApplicationContext) : ReactContextBase
             ks2.deleteEntry(ALIAS_DIAG)
         } catch (e: Exception) {
             Log.w("SelloSigning", "no se pudo diagnosticar: ${causaDe(e)}")
+        }
+    }
+
+    /**
+     * §10.1, punto 7 — mide, en vez de dar por bueno, que AES-GCM con clave
+     * autenticada funciona en este keymaster. Es la misma pregunta que
+     * diagnosticarOaep() responde para RSA, pero esa función usa una clave
+     * SIN autenticación porque corre en un hilo de fondo sin prompt; aquí no
+     * hay atajo: lo que hace falta comprobar es justo la ruta CON
+     * autenticación — la misma que generarBoveda() va a usar en producción
+     * — y eso exige un BiometricPrompt real.
+     *
+     * Genera una clave AES temporal con los MISMOS parámetros que
+     * generarBoveda(), pide autenticación una vez y cifra/descifra contra
+     * ella. La clave temporal se borra al terminar; no toca la bóveda real.
+     *
+     * Expuesto como método nativo para poder invocarse desde una pantalla de
+     * diagnóstico (ver "Comprobar la bóveda" en Dispositivo.tsx) en vez de
+     * darse por sentado.
+     */
+    @ReactMethod
+    fun probarBoveda(titulo: String, subtitulo: String, promesa: Promise) {
+        val actividad = reactApplicationContext.currentActivity as? FragmentActivity
+        if (actividad == null) {
+            promesa.reject("E_SIN_ACTIVIDAD", "La app no está en primer plano.")
+            return
+        }
+
+        try {
+            val ks = keystore()
+            if (ks.containsAlias(ALIAS_DIAG_BOVEDA)) ks.deleteEntry(ALIAS_DIAG_BOVEDA)
+
+            val spec = KeyGenParameterSpec.Builder(
+                ALIAS_DIAG_BOVEDA, KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT,
+            )
+                .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
+                .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
+                .setKeySize(256)
+                .setUserAuthenticationRequired(true)
+                .apply {
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                        setUserAuthenticationParameters(
+                            VENTANA_BOVEDA_S,
+                            KeyProperties.AUTH_BIOMETRIC_STRONG or KeyProperties.AUTH_DEVICE_CREDENTIAL,
+                        )
+                    } else {
+                        @Suppress("DEPRECATION")
+                        setUserAuthenticationValidityDurationSeconds(VENTANA_BOVEDA_S)
+                    }
+                }
+                .build()
+            KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, ANDROID_KEYSTORE)
+                .apply { init(spec) }
+                .generateKey()
+        } catch (e: Exception) {
+            promesa.reject("E_KEYGEN", fallo("probarBoveda/keygen", e), e)
+            return
+        }
+
+        fun limpiar() {
+            try {
+                val ks = keystore()
+                if (ks.containsAlias(ALIAS_DIAG_BOVEDA)) ks.deleteEntry(ALIAS_DIAG_BOVEDA)
+            } catch (e: Exception) {
+                Log.w("SelloSigning", "no se pudo borrar la clave de diagnóstico: ${e.message}")
+            }
+        }
+
+        actividad.runOnUiThread {
+            val prompt = BiometricPrompt(
+                actividad,
+                ContextCompat.getMainExecutor(actividad),
+                object : BiometricPrompt.AuthenticationCallback() {
+
+                    override fun onAuthenticationSucceeded(resultado: BiometricPrompt.AuthenticationResult) {
+                        val (funciona, detalle) = try {
+                            val entrada = keystore().getEntry(ALIAS_DIAG_BOVEDA, null) as KeyStore.SecretKeyEntry
+                            val dato = ByteArray(32).also { SecureRandom().nextBytes(it) }
+
+                            val cifrador = Cipher.getInstance("AES/GCM/NoPadding")
+                                .apply { init(Cipher.ENCRYPT_MODE, entrada.secretKey) }
+                            val ct = cifrador.doFinal(dato)
+
+                            val descifrador = Cipher.getInstance("AES/GCM/NoPadding").apply {
+                                init(Cipher.DECRYPT_MODE, entrada.secretKey, GCMParameterSpec(128, cifrador.iv))
+                            }
+                            val claro = descifrador.doFinal(ct)
+
+                            val ok = claro.contentEquals(dato)
+                            Log.i(
+                                "SelloSigning",
+                                "diag AES-GCM con autenticación: " +
+                                    if (ok) "FUNCIONA" else "descifra pero no coincide",
+                            )
+                            ok to (if (ok) "" else "el resultado no coincide con el original")
+                        } catch (e: Exception) {
+                            val causa = causaDe(e)
+                            Log.w("SelloSigning", "diag AES-GCM con autenticación: $causa")
+                            false to causa
+                        } finally {
+                            limpiar()
+                        }
+
+                        promesa.resolve(Arguments.createMap().apply {
+                            putBoolean("funciona", funciona)
+                            putString("detalle", detalle)
+                        })
+                    }
+
+                    override fun onAuthenticationError(codigo: Int, mensaje: CharSequence) {
+                        limpiar()
+                        when (codigo) {
+                            BiometricPrompt.ERROR_USER_CANCELED,
+                            BiometricPrompt.ERROR_NEGATIVE_BUTTON,
+                            BiometricPrompt.ERROR_CANCELED,
+                            -> promesa.reject("E_USER_CANCELED", "Cancelado por el usuario.")
+                            else -> promesa.reject("E_BIOMETRIA", mensaje.toString())
+                        }
+                    }
+                },
+            )
+
+            val info = BiometricPrompt.PromptInfo.Builder()
+                .setTitle(titulo)
+                .setSubtitle(subtitulo)
+                .setDescription("Comprueba, con una operación real, que la bóveda funciona en este equipo.")
+                .setAllowedAuthenticators(AUTENTICADORES)
+                .setConfirmationRequired(true)
+                .build()
+
+            prompt.authenticate(info)
         }
     }
 
@@ -529,82 +703,23 @@ class SigningModule(private val ctx: ReactApplicationContext) : ReactContextBase
         }
     }
 
-    // ── descifrado ───────────────────────────────────────
+    // ── autenticación genérica ─────────────────────────────
 
     /**
-     * §10 — abre un sobre cifrado híbrido, todo dentro del módulo nativo.
+     * §10.1 — autenticación "a secas": sin CryptoObject, no ata la
+     * aprobación a ninguna operación concreta. Su único efecto es desbloquear,
+     * durante VENTANA_BOVEDA_S segundos, las claves con autenticación por
+     * ventana — hoy, únicamente la bóveda.
      *
-     * El dominio cifra el dato con AES-256-GCM y envuelve la clave AES con la
-     * clave pública RSA de esta app. Aquí se hacen los dos pasos: la clave se
-     * desenvuelve en el chip y el dato se abre en Kotlin. Ni la privada RSA ni
-     * la clave AES cruzan el puente a JavaScript; solo sale el claro.
-     *
-     * MGF1 va con SHA-1, no con SHA-256. El AndroidKeyStore rechaza MGF1-SHA256
-     * con "Unsupported MGF1 digest: SHA-256. Only SHA-1 supported" — lo
-     * comprobamos en hardware, no en la documentación. El hash de OAEP sí es
-     * SHA-256; MGF1 es un parámetro aparte, y el emisor debe cifrar con esta
-     * misma combinación o el descifrado falla.
-     *
-     * Además hay que inicializar el Cipher con el spec ANTES de meterlo en el
-     * CryptoObject: lo que el prompt desbloquea es esa instancia concreta.
+     * Se llama antes de cifrarEnBoveda() o descifrarDeBoveda(); si esas
+     * llamadas ocurren dentro de la ventana no hace falta repetirla.
      */
     @ReactMethod
-    fun abrirSobre(
-        claveEnvueltaB64: String,
-        ivB64: String,
-        cifradoB64: String,
-        tagB64: String,
-        titulo: String,
-        subtitulo: String,
-        promesa: Promise,
-    ) {
+    fun autenticar(titulo: String, subtitulo: String, promesa: Promise) {
         val actividad = reactApplicationContext.currentActivity as? FragmentActivity
         if (actividad == null) {
             promesa.reject("E_SIN_ACTIVIDAD", "La app no está en primer plano.")
             return
-        }
-
-        val partes = try {
-            listOf(claveEnvueltaB64, ivB64, cifradoB64, tagB64).map { Base64.decode(it, Base64.NO_WRAP) }
-        } catch (e: IllegalArgumentException) {
-            promesa.reject("E_CIFRADO", "El sobre cifrado no es base64 válido.", e); return
-        }
-        val (claveEnvuelta, iv, cifrado, tag) = partes
-
-        // Con ventana de validez la clave NO admite CryptoObject: hay que
-        // autenticar a secas y usar la instancia de Cipher normal. Pasarle el
-        // CryptoObject haría fallar el propio prompt.
-        val porOperacion = prefs.getBoolean(PREF_POR_OPERACION, true)
-        val modo = if (porOperacion) "por operacion (CryptoObject)"
-            else "ventana de ${VENTANA_SIN_BIOMETRIA}s (sin CryptoObject)"
-
-        // Los tamaños delatan la mitad de los fallos: la clave envuelta tiene que
-        // medir exactamente lo que el módulo RSA (256 bytes con RSA-2048), el IV
-        // 12 y el tag 16. Si alguno no cuadra, el problema está en el transporte
-        // o en el emisor, no en el chip.
-        Log.i(
-            "SelloSigning",
-            "abrirSobre: claveEnvuelta=${claveEnvuelta.size}B iv=${iv.size}B " +
-                "cifrado=${cifrado.size}B tag=${tag.size}B, modo=$modo",
-        )
-
-        val cipher: Cipher = try {
-            val entrada = keystore().getEntry(ALIAS_CIFRADO, null) as? KeyStore.PrivateKeyEntry
-                ?: run { promesa.reject("E_SIN_IDENTIDAD", "No hay clave de cifrado."); return }
-            describirClave(ALIAS_CIFRADO, entrada.privateKey)
-            Cipher.getInstance("RSA/ECB/OAEPPadding").apply {
-                init(
-                    Cipher.DECRYPT_MODE,
-                    entrada.privateKey,
-                    OAEPParameterSpec(
-                        "SHA-256", "MGF1", MGF1ParameterSpec.SHA1, PSource.PSpecified.DEFAULT,
-                    ),
-                )
-            }
-        } catch (e: KeyPermanentlyInvalidatedException) {
-            promesa.reject("E_KEY_INVALIDATED", "La biometría del dispositivo cambió.", e); return
-        } catch (e: Exception) {
-            promesa.reject("E_KEYSTORE", fallo("abrirSobre/init", e), e); return
         }
 
         actividad.runOnUiThread {
@@ -614,49 +729,7 @@ class SigningModule(private val ctx: ReactApplicationContext) : ReactContextBase
                 object : BiometricPrompt.AuthenticationCallback() {
 
                     override fun onAuthenticationSucceeded(resultado: BiometricPrompt.AuthenticationResult) {
-                        var claveAes: ByteArray? = null
-                        try {
-                            // Con autenticación por operación, el Cipher desbloqueado
-                            // es el que sale del CryptoObject. Con ventana de validez
-                            // no hay CryptoObject: lo que desbloquea la clave es la
-                            // autenticación reciente, y vale la instancia de fuera.
-                            val c = resultado.cryptoObject?.cipher ?: cipher
-
-                            // 1. La clave AES se desenvuelve DENTRO del chip.
-                            claveAes = c.doFinal(claveEnvuelta)
-
-                            // 2. Y el dato se abre aquí mismo, en Kotlin. Hacerlo en
-                            //    JavaScript obligaría a pasar la clave AES en claro por
-                            //    el puente, que es justo lo que este diseño evita.
-                            val gcm = Cipher.getInstance("AES/GCM/NoPadding").apply {
-                                init(
-                                    Cipher.DECRYPT_MODE,
-                                    SecretKeySpec(claveAes, "AES"),
-                                    // El tag va al final del texto cifrado en la API de
-                                    // Java; por eso se concatena en vez de pasarse aparte.
-                                    GCMParameterSpec(tag.size * 8, iv),
-                                )
-                            }
-                            val claro = gcm.doFinal(cifrado + tag)
-
-                            promesa.resolve(Arguments.createMap().apply {
-                                putString("claroB64", b64(claro))
-                            })
-                        } catch (e: javax.crypto.AEADBadTagException) {
-                            // GCM autentica: si el tag no cuadra, alguien alteró el
-                            // dato por el camino. No se devuelve nada a medias.
-                            promesa.reject("E_ALTERADO", "El secreto llegó alterado.", e)
-                        } catch (e: Exception) {
-                            // Un fallo aquí suele ser padding: el emisor cifró con
-                            // otros parámetros OAEP que los que espera esta clave.
-                            promesa.reject("E_DESCIFRADO", fallo("abrirSobre", e), e)
-                            // En un hilo aparte: genera una clave y hace cinco
-                            // operaciones, demasiado para el hilo principal.
-                            Thread { diagnosticarOaep() }.start()
-                        } finally {
-                            // La clave AES no tiene por qué seguir en memoria.
-                            claveAes?.fill(0)
-                        }
+                        promesa.resolve(null)
                     }
 
                     override fun onAuthenticationError(codigo: Int, mensaje: CharSequence) {
@@ -674,26 +747,186 @@ class SigningModule(private val ctx: ReactApplicationContext) : ReactContextBase
             val info = BiometricPrompt.PromptInfo.Builder()
                 .setTitle(titulo)
                 .setSubtitle(subtitulo)
-                .setDescription("Se abre dentro del chip seguro. La clave no sale del teléfono.")
-                // Los autenticadores del prompt tienen que coincidir con los que
-                // autoriza la clave. Si la clave es solo biométrica y el prompt
-                // ofrece el PIN, el usuario puede elegir una vía que el chip
-                // luego rechaza — y el error no dice que fuera por eso.
-                .setAllowedAuthenticators(
-                    if (porOperacion) {
-                        BiometricManager.Authenticators.BIOMETRIC_STRONG
-                    } else {
-                        BiometricManager.Authenticators.DEVICE_CREDENTIAL
-                    },
-                )
+                .setAllowedAuthenticators(AUTENTICADORES)
                 .setConfirmationRequired(true)
                 .build()
 
-            if (porOperacion) {
-                prompt.authenticate(info, BiometricPrompt.CryptoObject(cipher))
-            } else {
-                prompt.authenticate(info)
+            prompt.authenticate(info)
+        }
+    }
+
+    // ── descifrado ───────────────────────────────────────
+
+    /**
+     * §10 / §10.1 — abre un sobre cifrado híbrido, todo dentro del módulo
+     * nativo, SIN pedir autenticación.
+     *
+     * Antes este paso pedía BiometricPrompt + CryptoObject sobre la clave
+     * RSA. Se quitó porque en este keymaster esa combinación no funciona
+     * (ver generarCifrado()) y, mirado con calma, porque no hacía falta: lo
+     * que autoriza recibir un secreto nuevo es la firma de la prueba de
+     * posesión, que ya viajó un instante antes en pruebaDePosesion() y esa sí
+     * funciona. Pedir otra vez aquí era repetir la misma comprobación con
+     * otro nombre, no añadir una nueva. La autenticación real de este flujo
+     * vive ahora en la bóveda — ver cifrarEnBoveda()/descifrarDeBoveda() y
+     * §10.1 de diseno_app.md.
+     *
+     * El dato se abre en dos pasos, igual que antes: la clave AES se
+     * desenvuelve con la privada RSA y el dato se abre con AES-GCM, los dos
+     * aquí mismo. Ni la privada RSA ni la clave AES cruzan el puente a
+     * JavaScript; solo sale el claro.
+     *
+     * MGF1 va con SHA-1, no con SHA-256 — ver generarCifrado() para el
+     * porqué.
+     */
+    @ReactMethod
+    fun abrirSobre(
+        claveEnvueltaB64: String,
+        ivB64: String,
+        cifradoB64: String,
+        tagB64: String,
+        promesa: Promise,
+    ) {
+        val partes = try {
+            listOf(claveEnvueltaB64, ivB64, cifradoB64, tagB64).map { Base64.decode(it, Base64.NO_WRAP) }
+        } catch (e: IllegalArgumentException) {
+            promesa.reject("E_CIFRADO", "El sobre cifrado no es base64 válido.", e); return
+        }
+        val (claveEnvuelta, iv, cifrado, tag) = partes
+
+        // Los tamaños delatan la mitad de los fallos: la clave envuelta tiene que
+        // medir exactamente lo que el módulo RSA (256 bytes con RSA-2048), el IV
+        // 12 y el tag 16. Si alguno no cuadra, el problema está en el transporte
+        // o en el emisor, no en el chip.
+        Log.i(
+            "SelloSigning",
+            "abrirSobre: claveEnvuelta=${claveEnvuelta.size}B iv=${iv.size}B " +
+                "cifrado=${cifrado.size}B tag=${tag.size}B",
+        )
+
+        var claveAes: ByteArray? = null
+        try {
+            val entrada = keystore().getEntry(ALIAS_CIFRADO, null) as? KeyStore.PrivateKeyEntry
+                ?: run { promesa.reject("E_SIN_IDENTIDAD", "No hay clave de cifrado."); return }
+            describirClave(ALIAS_CIFRADO, entrada.privateKey)
+
+            // 1. La clave AES se desenvuelve dentro del chip.
+            val rsa = Cipher.getInstance("RSA/ECB/OAEPPadding").apply {
+                init(
+                    Cipher.DECRYPT_MODE,
+                    entrada.privateKey,
+                    OAEPParameterSpec("SHA-256", "MGF1", MGF1ParameterSpec.SHA1, PSource.PSpecified.DEFAULT),
+                )
             }
+            claveAes = rsa.doFinal(claveEnvuelta)
+
+            // 2. Y el dato se abre aquí mismo, en Kotlin. Hacerlo en JavaScript
+            //    obligaría a pasar la clave AES en claro por el puente, que es
+            //    justo lo que este diseño evita.
+            val gcm = Cipher.getInstance("AES/GCM/NoPadding").apply {
+                init(
+                    Cipher.DECRYPT_MODE,
+                    SecretKeySpec(claveAes, "AES"),
+                    // El tag va al final del texto cifrado en la API de
+                    // Java; por eso se concatena en vez de pasarse aparte.
+                    GCMParameterSpec(tag.size * 8, iv),
+                )
+            }
+            val claro = gcm.doFinal(cifrado + tag)
+
+            promesa.resolve(Arguments.createMap().apply {
+                putString("claroB64", b64(claro))
+            })
+        } catch (e: javax.crypto.AEADBadTagException) {
+            // GCM autentica: si el tag no cuadró, alguien alteró el dato por
+            // el camino. No se devuelve nada a medias.
+            promesa.reject("E_ALTERADO", "El secreto llegó alterado.", e)
+        } catch (e: Exception) {
+            // Ya no debería pasar por un problema de autenticación — era
+            // justo el fallo que este cambio corrige — pero si algo más
+            // rompe esta combinación de parámetros, el diagnóstico de
+            // siempre sigue disponible.
+            promesa.reject("E_DESCIFRADO", fallo("abrirSobre", e), e)
+            Thread { diagnosticarOaep() }.start()
+        } finally {
+            // La clave AES no tiene por qué seguir en memoria.
+            claveAes?.fill(0)
+        }
+    }
+
+    // ── bóveda ───────────────────────────────────────────
+
+    /**
+     * §10.1 / §11 — cifra un dato para la bóveda local con la clave AES-GCM
+     * `sello.boveda.v1`. Pide autenticación reciente (ver autenticar()); si
+     * la ventana ya expiró, el Keystore lanza UserNotAuthenticatedException
+     * y se traduce a E_SIN_AUTENTICAR para que el lado JS pueda llamar a
+     * autenticar() y reintentar.
+     *
+     * El IV no se elige aquí a mano: para una clave del Keystore,
+     * AndroidKeyStore genera uno nuevo en cada cifrado y lo expone en
+     * `cipher.iv` después de init(). Fijarlo a mano sería reutilizar nonces
+     * con GCM, justo lo que el documento prohíbe en su §20.
+     */
+    @ReactMethod
+    fun cifrarEnBoveda(claroB64: String, promesa: Promise) {
+        try {
+            val claro = try {
+                Base64.decode(claroB64, Base64.NO_WRAP)
+            } catch (e: IllegalArgumentException) {
+                promesa.reject("E_CIFRADO", "El dato a guardar no es base64 válido.", e); return
+            }
+            val entrada = keystore().getEntry(ALIAS_BOVEDA, null) as? KeyStore.SecretKeyEntry
+                ?: run { promesa.reject("E_SIN_IDENTIDAD", "No hay clave de bóveda."); return }
+
+            val cipher = Cipher.getInstance("AES/GCM/NoPadding").apply {
+                init(Cipher.ENCRYPT_MODE, entrada.secretKey)
+            }
+            val salida = cipher.doFinal(claro)
+            val corte = salida.size - 16
+
+            promesa.resolve(Arguments.createMap().apply {
+                putString("ivB64", b64(cipher.iv))
+                putString("cifradoB64", b64(salida.copyOfRange(0, corte)))
+                putString("tagB64", b64(salida.copyOfRange(corte, salida.size)))
+            })
+        } catch (e: UserNotAuthenticatedException) {
+            promesa.reject("E_SIN_AUTENTICAR", "Hay que autenticar antes de guardar en la bóveda.", e)
+        } catch (e: KeyPermanentlyInvalidatedException) {
+            promesa.reject("E_KEY_INVALIDATED", "La biometría del dispositivo cambió.", e)
+        } catch (e: Exception) {
+            promesa.reject("E_CIFRADO", fallo("cifrarEnBoveda", e), e)
+        }
+    }
+
+    /** §10.1 / §14 — el inverso: lee un secreto de la bóveda. Misma regla de autenticación. */
+    @ReactMethod
+    fun descifrarDeBoveda(ivB64: String, cifradoB64: String, tagB64: String, promesa: Promise) {
+        try {
+            val partes = try {
+                listOf(ivB64, cifradoB64, tagB64).map { Base64.decode(it, Base64.NO_WRAP) }
+            } catch (e: IllegalArgumentException) {
+                promesa.reject("E_DESCIFRADO", "El sobre guardado no es base64 válido.", e); return
+            }
+            val (iv, cifrado, tag) = partes
+
+            val entrada = keystore().getEntry(ALIAS_BOVEDA, null) as? KeyStore.SecretKeyEntry
+                ?: run { promesa.reject("E_SIN_IDENTIDAD", "No hay clave de bóveda."); return }
+
+            val cipher = Cipher.getInstance("AES/GCM/NoPadding").apply {
+                init(Cipher.DECRYPT_MODE, entrada.secretKey, GCMParameterSpec(tag.size * 8, iv))
+            }
+            val claro = cipher.doFinal(cifrado + tag)
+
+            promesa.resolve(Arguments.createMap().apply { putString("claroB64", b64(claro)) })
+        } catch (e: javax.crypto.AEADBadTagException) {
+            promesa.reject("E_ALTERADO", "El secreto guardado llegó alterado.", e)
+        } catch (e: UserNotAuthenticatedException) {
+            promesa.reject("E_SIN_AUTENTICAR", "Hay que autenticar antes de leer la bóveda.", e)
+        } catch (e: KeyPermanentlyInvalidatedException) {
+            promesa.reject("E_KEY_INVALIDATED", "La biometría del dispositivo cambió.", e)
+        } catch (e: Exception) {
+            promesa.reject("E_DESCIFRADO", fallo("descifrarDeBoveda", e), e)
         }
     }
 
@@ -799,6 +1032,7 @@ class SigningModule(private val ctx: ReactApplicationContext) : ReactContextBase
             val ks = keystore()
             if (ks.containsAlias(ALIAS)) ks.deleteEntry(ALIAS)
             if (ks.containsAlias(ALIAS_CIFRADO)) ks.deleteEntry(ALIAS_CIFRADO)
+            if (ks.containsAlias(ALIAS_BOVEDA)) ks.deleteEntry(ALIAS_BOVEDA)
             prefs.edit().clear().apply()
             promesa.resolve(null)
         } catch (e: Exception) {
