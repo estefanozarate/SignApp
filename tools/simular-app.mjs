@@ -294,5 +294,138 @@ console.log('\nCasos que deben fallar:');
     `HTTP ${a.codigo} y ${b.codigo}`);
 }
 
+{
+  // 2/24 y 7/24 — QR con domain o nonce alterados. verificar() de este
+  // script reproduce la misma comparación que hace la app en §6: si lo que
+  // el dominio confirma no coincide con lo que decía el QR, se rechaza
+  // ANTES de confiar en nada de lo que venga después.
+  const c = await pedir('PAIR');
+  let lanzo1 = false;
+  try { await verificar({ ...c.qr, domain: 'otro-dominio.evil' }); } catch { lanzo1 = true; }
+  comprobar('2/24 · QR con domain alterado se detecta antes de confiar en la respuesta', lanzo1);
+
+  const c2 = await pedir('PAIR');
+  let lanzo2 = false;
+  try { await verificar({ ...c2.qr, nonce: 'un-nonce-que-no-es-el-real' }); } catch { lanzo2 = true; }
+  comprobar('7/24 · QR con nonce alterado se detecta antes de confiar en la respuesta', lanzo2);
+}
+{
+  // 8/24 — prueba de posesión que no es una firma válida sobre el contexto
+  // correcto (aquí, una firma sobre un texto cualquiera).
+  const c = await pedir('PAIR');
+  const p = await verificar(c.qr);
+  const { codigo } = await responder(p, {
+    type: 'APP_IDENTITY', version: 1, app_id: randomBytes(16).toString('hex'),
+    app_public_key: spki(firma.publicKey),
+    app_encryption_key: spki(cifrado.publicKey),
+    proof_of_possession: firmar('esto no es el contexto que se debía firmar'),
+  });
+  comprobar('8/24 · prueba de posesión que no cubre el contexto correcto se rechaza', codigo === 403, `HTTP ${codigo}`);
+}
+{
+  // 9/24 — la prueba se firma con una clave, pero se anuncia la pública de
+  // OTRA: la verificación tiene que fallar porque no son el mismo par.
+  const otraFirma = generateKeyPairSync('ec', { namedCurve: 'prime256v1' });
+  const c = await pedir('PAIR');
+  const p = await verificar(c.qr);
+  const { codigo } = await responder(p, {
+    type: 'APP_IDENTITY', version: 1, app_id: randomBytes(16).toString('hex'),
+    app_public_key: spki(otraFirma.publicKey),   // la pública que se anuncia…
+    app_encryption_key: spki(cifrado.publicKey),
+    proof_of_possession: pruebaDePosesion(p, 'PAIR'),   // …no es la que firmó esto
+  });
+  comprobar('9/24 · app_public_key que no corresponde a quien firmó se rechaza', codigo === 403, `HTTP ${codigo}`);
+}
+{
+  // 12/24 — una respuesta firmada y cifrada, capturada de una petición A, se
+  // reenvía contra una petición B distinta. El sobre descifra bien (es el
+  // mismo dominio), pero el contexto que va DENTRO —firmado— es el de A, y
+  // no coincide con el de B: eso es lo que impide el reuso.
+  const cA = await pedir('SECRET_REQUEST');
+  const pA = await verificar(cA.qr);
+  const rA = { version: 1, request_id: pA.request_id, nonce: pA.nonce, domain_id: pA.domain_id, app_id: APP_ID, secret: secreto };
+  const sobreDeA = cerrarSobre(pA.domain_public_key, JSON.stringify({ ...rA, signature: firmar(canonico(rA, pA.domain)) }));
+
+  const cB = await pedir('SECRET_REQUEST');
+  const pB = await verificar(cB.qr);
+  const { codigo, cuerpo } = await responder(pB, { type: 'SECRET_RESPONSE', version: 1, envelope: sobreDeA });
+  comprobar('12/24 · una respuesta capturada de otra petición no sirve para esta',
+    codigo === 400, `HTTP ${codigo} ${cuerpo.error ?? ''}`);
+}
+{
+  // 16/24 — no ya una firma sobre otro contenido (eso ya se prueba arriba),
+  // sino los bytes crudos de la firma alterados un bit.
+  const c = await pedir('SECRET_REQUEST');
+  const p = await verificar(c.qr);
+  const r = { version: 1, request_id: p.request_id, nonce: p.nonce, domain_id: p.domain_id, app_id: APP_ID, secret: secreto };
+  const bytes = Buffer.from(firmar(canonico(r, p.domain)), 'base64');
+  bytes[0] ^= 0xff;
+  const sobre = cerrarSobre(p.domain_public_key, JSON.stringify({ ...r, signature: bytes.toString('base64') }));
+  const { codigo, cuerpo } = await responder(p, { type: 'SECRET_RESPONSE', version: 1, envelope: sobre });
+  comprobar('16/24 · bytes de la firma alterados se rechazan', codigo === 403, `HTTP ${codigo} ${cuerpo.error ?? ''}`);
+}
+{
+  // 18/24 — el sobre se cifra para una clave RSA que no es la del dominio
+  // (una ajena, no la que devolvió /verificar). El dominio intenta abrirlo
+  // con SU privada real y el desenvuelto falla: ni el padding OAEP ni la
+  // autenticación de GCM van a cuadrar con una clave que no es la suya.
+  const ajena = generateKeyPairSync('rsa', { modulusLength: 2048 });
+  const c = await pedir('SECRET_REQUEST');
+  const p = await verificar(c.qr);
+  const r = { version: 1, request_id: p.request_id, nonce: p.nonce, domain_id: p.domain_id, app_id: APP_ID, secret: secreto };
+  const sobre = cerrarSobre(spki(ajena.publicKey), JSON.stringify({ ...r, signature: firmar(canonico(r, p.domain)) }));
+  const { codigo, cuerpo } = await responder(p, { type: 'SECRET_RESPONSE', version: 1, envelope: sobre });
+  comprobar('18/24 · sobre cifrado para una clave que no es la del dominio se rechaza',
+    codigo === 400, `HTTP ${codigo} ${cuerpo.error ?? ''}`);
+}
+{
+  // 21/24 — lo que recoge el navegador (GET /respuesta/:id) no debe traer el
+  // secreto en claro en ningún campo, ni siquiera envuelto: el §14 se lo
+  // entrega al DOMINIO, y una página estática no tiene dónde custodiarlo.
+  const c = await pedir('SECRET_REQUEST');
+  const p = await verificar(c.qr);
+  const r = { version: 1, request_id: p.request_id, nonce: p.nonce, domain_id: p.domain_id, app_id: APP_ID, secret: secreto };
+  const sobre = cerrarSobre(p.domain_public_key, JSON.stringify({ ...r, signature: firmar(canonico(r, p.domain)) }));
+  await responder(p, { type: 'SECRET_RESPONSE', version: 1, envelope: sobre });
+  const textoParaElNavegador = await (await fetch(`${DOMINIO}/respuesta/${p.request_id}`)).text();
+  comprobar('21/24 · el secreto en claro nunca llega a lo que ve el navegador',
+    !textoParaElNavegador.includes(secreto));
+}
+{
+  // 23/24 — caducidad, pero específicamente en una petición de RECUPERACIÓN
+  // de secreto (SECRET_REQUEST), no de emparejamiento: son dos propósitos
+  // distintos y el §19 exige que cada uno se valide por su cuenta.
+  const { cuerpo } = await json(await fetch(`${DOMINIO}/peticion`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ purpose: 'SECRET_REQUEST', ttl: 1 }),
+  }));
+  await new Promise((r) => setTimeout(r, 2200));
+  const { codigo } = await json(await fetch(`${DOMINIO}/verificar/${cuerpo.request_id}`));
+  comprobar('23/24 · petición de recuperación de secreto caducada se rechaza', codigo === 410, `HTTP ${codigo}`);
+}
+
+/*
+ * Del §24 quedan sin ejercitar aquí, y por qué:
+ *
+ * 10/24 "Wrong domain public key" — es la clave del PROPIO dominio; este
+ *   script solo levanta un dominio, así que no hay una "clave equivocada
+ *   del dominio" que presentar sin montar un segundo servidor.
+ * 11/24 "Wrong domain requesting another domain's secret" — el §13
+ *   (dominio ≠ el que guardó el secreto) lo hace boveda.ts/paraDominio() en
+ *   la APP, no este servidor: un servidor de un solo dominio no tiene con
+ *   qué simular a "otro dominio" pidiendo. Se revisa por lectura de código,
+ *   no por esta suite.
+ * 14/24 y 25/24 (sesión WebRTC) — no aplican: el transporte de esta
+ *   implementación es HTTP, no WebRTC (ver server/README.md "Por qué esto
+ *   es HTTP y no WebRTC"). No hay sesión que inyectar ni con la que
+ *   confundir un mensaje.
+ * 19/24 y 20/24 (que las privadas nunca se transmitan) — son propiedades
+ *   del CÓDIGO (qué cruza el puente nativo, qué campos manda cada mensaje),
+ *   no algo observable desde fuera por HTTP: ninguna llamada al protocolo
+ *   incluye jamás esos campos, así que no hay una petición que hacer para
+ *   "probar que no pasa". Se verifica leyendo SigningModule.kt y
+ *   servidor.mjs, no ejecutando este script.
+ */
+
 console.log(fallos === 0 ? '\nTodo en orden.' : `\n${fallos} comprobación(es) fallaron.`);
 process.exit(fallos === 0 ? 0 : 1);
