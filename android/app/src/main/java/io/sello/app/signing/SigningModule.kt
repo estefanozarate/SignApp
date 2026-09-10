@@ -37,7 +37,8 @@ import javax.crypto.spec.SecretKeySpec
  * Son TRES claves, y la separación no es capricho:
  *
  *   - EC P-256 (PURPOSE_SIGN) para firmar: identidad, prueba de posesión y
- *     aprobaciones. Autenticación por operación (CryptoObject).
+ *     aprobaciones. Autenticación por operación (CryptoObject). SIEMPRE en
+ *     TEE, nunca StrongBox — ver la nota "hallazgo, EC" más abajo.
  *   - RSA-2048 (PURPOSE_DECRYPT, OAEP-SHA256) para recibir secretos cifrados
  *     por el dominio. SIN autenticación, y SIEMPRE en TEE, nunca StrongBox —
  *     ver generarCifrado() y §10.1 de diseno_app.md para el porqué de cada
@@ -54,6 +55,19 @@ import javax.crypto.spec.SecretKeySpec
  * clave en StrongBox — con o sin autenticación de por medio. Por eso la clave
  * RSA ya no pide autenticación y además fuerza TEE: dos ajustes distintos,
  * cada uno resuelto por su propia evidencia de diagnóstico.
+ *
+ * Hallazgo, EC — sin confirmar en hardware todavía: firmar() reportó el
+ * mismo IllegalBlockSizeException ← KeyStoreException "Unknown error" que ya
+ * se había diagnosticado para el RSA, esta vez viniendo de Signature.sign()
+ * sobre la clave EC en vez de Cipher.doFinal() sobre la RSA. La clave EC
+ * generaba igual que la RSA original: StrongBox primero, TEE si fallaba — y
+ * la generación en StrongBox no lanza excepción en este chip, así que pudo
+ * terminar ahí sin que nadie lo notara hasta el primer intento de firmar. Se
+ * quitó el intento de StrongBox para la EC, en línea con lo ya comprobado
+ * para la RSA, sin tocar la autenticación por operación (que sigue siendo la
+ * que da valor a la prueba de posesión). Falta confirmar en el dispositivo
+ * real si esto solo es suficiente o si además haría falta mover la EC a
+ * autenticación por ventana, como la bóveda.
  *
  * Ninguna privada cruza el puente a JavaScript: por aquí salen firmas, claves
  * públicas y texto en claro ya descifrado.
@@ -99,7 +113,7 @@ class SigningModule(private val ctx: ReactApplicationContext) : ReactContextBase
     private fun keystore(): KeyStore =
         KeyStore.getInstance(ANDROID_KEYSTORE).apply { load(null) }
 
-    // ── consulta ──────────────────────────────────────────
+    // ── consulta ────────────────────────
 
     @ReactMethod
     fun tieneIdentidad(promesa: Promise) {
@@ -124,11 +138,11 @@ class SigningModule(private val ctx: ReactApplicationContext) : ReactContextBase
         }
     }
 
-    // ── creación ─────────────────────────────────────────
+    // ── creación ─────────────────────────
 
     /**
-     * EC P-256, PURPOSE_SIGN, no exportable. Se intenta primero en StrongBox
-     * (elemento seguro dedicado); si el equipo no lo tiene, cae al TEE.
+     * EC P-256, PURPOSE_SIGN, no exportable. Siempre en TEE — ver la nota
+     * "hallazgo, EC" al principio del archivo.
      */
     @ReactMethod
     fun crearIdentidad(promesa: Promise) {
@@ -145,13 +159,14 @@ class SigningModule(private val ctx: ReactApplicationContext) : ReactContextBase
             if (ks.containsAlias(ALIAS_BOVEDA)) ks.deleteEntry(ALIAS_BOVEDA)
 
             val keyId = UUID.randomUUID().toString()
-            // StrongBox primero; si el equipo no lo tiene, TEE. Si ambos fallan se
-            // propaga la causa real en vez de reportar un genérico.
-            val conStrongBox = try {
-                generar(keyId, strongBox = true); true
-            } catch (e: Exception) {
-                generar(keyId, strongBox = false); false
-            }
+            // SIEMPRE en TEE, nunca StrongBox — ver generarCifrado() y la nota
+            // más abajo (marcada "hallazgo, EC") para el motivo. Antes se
+            // intentaba StrongBox primero y se caía a TEE si fallaba; esa
+            // generación en StrongBox no lanzaba excepción en este chip —
+            // el mismo patrón engañoso que ya rompía la clave RSA — y la
+            // clave terminaba ahí sin que nadie lo notara hasta firmar.
+            val conStrongBox = false
+            generar(keyId, strongBox = conStrongBox)
 
             // La de cifrado va SIEMPRE en TEE, nunca StrongBox — ver el doc de
             // generarCifrado(). Con clave en TEE la generación no lanza y el
@@ -367,7 +382,7 @@ class SigningModule(private val ctx: ReactApplicationContext) : ReactContextBase
         }
     }
 
-    // ── diagnóstico ──────────────────────────────────────
+    // ── diagnóstico ──────────────────────
 
     /**
      * El AndroidKeyStore envuelve casi todos sus fallos en excepciones
@@ -695,7 +710,7 @@ class SigningModule(private val ctx: ReactApplicationContext) : ReactContextBase
         }
     }
 
-    // ── firma ────────────────────────────────────────────
+    // ── firma ──────────────────────────
 
     /**
      * El reto llega en base64 y se firma dentro del chip. El texto del prompt
@@ -776,7 +791,7 @@ class SigningModule(private val ctx: ReactApplicationContext) : ReactContextBase
         }
     }
 
-    // ── autenticación genérica ─────────────────────────────
+    // ── autenticación genérica ───────────────────
 
     /**
      * §10.1 — autenticación "a secas": sin CryptoObject, no ata la
@@ -828,7 +843,7 @@ class SigningModule(private val ctx: ReactApplicationContext) : ReactContextBase
         }
     }
 
-    // ── descifrado ───────────────────────────────────────
+    // ── descifrado ───────────────────────
 
     /**
      * §10 / §10.1 — abre un sobre cifrado híbrido, todo dentro del módulo
@@ -927,7 +942,7 @@ class SigningModule(private val ctx: ReactApplicationContext) : ReactContextBase
         }
     }
 
-    // ── bóveda ───────────────────────────────────────────
+    // ── bóveda ────────────────────────
 
     /**
      * §10.1 / §11 — cifra un dato para la bóveda local con la clave AES-GCM
@@ -1003,7 +1018,7 @@ class SigningModule(private val ctx: ReactApplicationContext) : ReactContextBase
         }
     }
 
-    // ── cifrado ──────────────────────────────────────────
+    // ── cifrado ─────────────────────────
 
     /**
      * §14 — cierra un sobre cifrado para el dominio. El inverso de abrirSobre().
@@ -1097,7 +1112,7 @@ class SigningModule(private val ctx: ReactApplicationContext) : ReactContextBase
         }
     }
 
-    // ── borrado ──────────────────────────────────────────
+    // ── borrado ────────────────────────
 
     @ReactMethod
     fun borrarIdentidad(promesa: Promise) {
