@@ -39,6 +39,24 @@ const LIMPIEZA_MS = 60000;
 /** §15: los propósitos válidos. Una petición de un tipo no sirve para el otro. */
 const PROPOSITOS = new Set(['PAIR', 'SECRET_REQUEST']);
 
+/**
+ * Qué digest usa MGF1 al envolver la clave AES para la app.
+ *
+ * Debería ser un detalle cerrado, y no lo es. El framework de Android solo
+ * acepta MGF1ParameterSpec.SHA1 en el spec del Cipher — rechaza SHA-256 con
+ * "Unsupported MGF1 digest". Pero varios keymaster ignoran ese parámetro y
+ * aplican MGF1 con el MISMO digest que OAEP, o sea SHA-256. En esos equipos
+ * el emisor tiene que envolver con SHA-256 aunque la app pida SHA-1; si no,
+ * el chip falla al deshacer el padding con un "Unknown error" que no dice
+ * nada, porque el keymaster no tiene código para "el padding no cuadra".
+ *
+ * Por eso es conmutable: es la única forma de averiguar qué hace un TEE
+ * concreto sin recompilar la app.
+ *
+ *   MGF1=sha256 npm start
+ */
+const MGF1_APP = process.env.MGF1 === 'sha256' ? 'sha256' : 'sha1';
+
 // ── §3.2 identidad del dominio, persistida ──────────────────────────
 
 /**
@@ -138,10 +156,9 @@ function pruebaValida(peticion, spkiB64, firmaDerB64, contexto) {
  * si alguien altera el texto cifrado por el camino, el descifrado falla en
  * vez de devolver basura silenciosamente.
  *
- * La combinación OAEP-SHA256 + MGF1-SHA1 no es arbitraria: el AndroidKeyStore
- * solo admite MGF1 con SHA-1 y rechaza SHA-256 con "Unsupported MGF1 digest".
- * Lo descubrimos probando en el teléfono, no leyendo la documentación. Los dos
- * lados tienen que usar exactamente estos parámetros o el descifrado falla.
+ * El hash de OAEP es SHA-256 y no se discute. El de MGF1 depende del equipo:
+ * ver MGF1_APP arriba. Los dos lados tienen que coincidir o el descifrado
+ * falla sin decir por qué.
  */
 function cifrarParaLaApp(secreto, spkiB64) {
   const claveApp = createPublicKey({
@@ -156,13 +173,13 @@ function cifrarParaLaApp(secreto, spkiB64) {
   return {
     // El nombre dice la combinación exacta, para que un cliente futuro
     // no tenga que adivinar los parámetros.
-    alg: 'RSA-OAEP-256-MGF1SHA1+A256GCM',
+    alg: `RSA-OAEP-256-MGF1${MGF1_APP.toUpperCase()}+A256GCM`,
     encrypted_key: publicEncrypt(
       {
         key: claveApp,
         padding: constants.RSA_PKCS1_OAEP_PADDING,
         oaepHash: 'sha256',
-        mgf1Hash: 'sha1',
+        mgf1Hash: MGF1_APP,
       },
       claveAes,
     ).toString('base64'),
@@ -179,6 +196,10 @@ function cifrarParaLaApp(secreto, spkiB64) {
  * cerrarSobre() en Kotlin, con los mismos parámetros OAEP: SHA-256 para el
  * hash y SHA-1 para MGF1. Si no coincidieran, esto fallaría con un error de
  * padding que no dice nada de la causa.
+ *
+ * Aquí MGF1 sí es SHA-1 fijo, y no sigue a MGF1_APP: este sobre lo cierra
+ * Conscrypt con una clave pública normal, no el Keystore, y ese proveedor sí
+ * respeta el parámetro que se le pasa.
  *
  * Lanza si algo no cuadra — y que lance es la respuesta correcta: GCM
  * autentica, así que un fallo aquí significa que el dato llegó alterado o que
@@ -419,7 +440,7 @@ const servidor = createServer(async (req, res) => {
         log(partes[1], `no se pudo cifrar: ${e.message}`);
         return responder(res, 400, { error: 'clave de cifrado no válida' });
       }
-      log(partes[1], `secreto entregado cifrado (${huella(secreto)}…)`);
+      log(partes[1], `secreto entregado cifrado con MGF1-${MGF1_APP} (${huella(secreto)}…)`);
 
       p.resultadoParaElSitio = {
         type: 'APP_IDENTITY',
@@ -546,5 +567,6 @@ servidor.listen(PUERTO, HOST, () => {
   console.log(claveNueva
     ? `Clave del dominio creada en ${RUTA_CLAVE}`
     : `Clave del dominio cargada de ${RUTA_CLAVE}`);
+  console.log(`MGF1 al cifrar para la app: ${MGF1_APP}  (cambia con MGF1=sha256 npm start)`);
   console.log('Para que el teléfono llegue hasta aquí:  adb reverse tcp:8787 tcp:8787');
 });
