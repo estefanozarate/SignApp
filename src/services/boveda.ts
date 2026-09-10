@@ -1,4 +1,5 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import type { SobreBoveda } from '../native/Signing';
 
 /**
  * Bóveda de secretos ligados a la IDENTIDAD del dominio (§11, §16).
@@ -9,10 +10,17 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
  * dominio. Buscar por nombre dejaría que un sitio con el mismo nombre pero
  * otra clave reclamara un secreto ajeno.
  *
- * Lo que se guarda aquí ya está EN CLARO: salió del chip descifrado. Es un
- * cambio de riesgo respecto al resto de la app, donde nada secreto se
- * almacenaba. Se asume porque es lo que el protocolo pide, pero conviene
- * tenerlo presente.
+ * §10.1 — lo que se guarda aquí YA NO está en claro. El §11 pide
+ * `encrypted_secret`, y hasta esta corrección se guardaba el secreto tal
+ * cual salía del chip. Ahora se guarda su `sobre`: el resultado de
+ * Signing.cifrarEnBoveda(), cifrado con la clave AES-GCM `sello.boveda.v1`
+ * del Keystore. Leerlo exige autenticar() + Signing.descifrarDeBoveda(); ver
+ * services/peticion.ts (entregarSecreto) y screens/Boveda.tsx.
+ *
+ * Los metadatos del dominio (domain, domain_id, domain_public_key) siguen en
+ * claro a propósito: el §13 necesita compararlos para decidir si rechaza una
+ * petición, y eso no debe exigirle un PIN a quien solo está mirando si el
+ * sitio tiene algo guardado.
  */
 export type SecretoGuardado = {
   /** §16 — la identidad del dominio, derivada de su clave pública. */
@@ -20,7 +28,8 @@ export type SecretoGuardado = {
   /** El nombre solo se guarda para mostrarlo; nunca para decidir. */
   domain: string;
   domain_public_key: string;
-  secreto: string;
+  /** §10.1/§11 — el secreto cifrado con la clave de la bóveda; nunca en claro. */
+  sobre: SobreBoveda;
   recibidoEn: number;
 };
 

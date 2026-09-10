@@ -1,11 +1,11 @@
 import { Signing } from '../native/Signing';
 import type { SecretoGuardado } from './boveda';
 import { bytesAB64, textoABytes } from '../lib/aleatorio';
-import { b64ABytes } from '../lib/b64';
+import { retoLegible, textoDeB64 } from '../lib/b64';
 
 /**
  * Petición de un dominio, verificada contra el propio dominio por HTTPS.
- * Implementa §4.2, §5, §6, §7 y §10 de diseno_app.md.
+ * Implementa §4.2, §5, §6, §7, §10 y §10.1 de diseno_app.md.
  */
 
 /** §4.2 — lo que el QR contiene, y nada más. */
@@ -264,6 +264,11 @@ export async function rechazar(p: Peticion) {
  * Los dos pasos ocurren dentro del módulo nativo: la clave AES se desenvuelve
  * en el chip y el dato se abre en Kotlin. Ni la privada RSA ni la clave AES
  * cruzan el puente; aquí solo llega el claro ya descifrado.
+ *
+ * §10.1 — ya no pide autenticación: lo que autoriza este paso es la firma de
+ * la prueba de posesión que ya viajó en pruebaDePosesion(), no un prompt
+ * nuevo aquí. El secreto que sale de aquí todavía no está guardado; quien lo
+ * guarda (Aprobacion.tsx) sí pasa por autenticar() al meterlo en la bóveda.
  */
 export async function abrirSecreto(
   s: SecretoCifrado, p: Peticion,
@@ -272,34 +277,8 @@ export async function abrirSecreto(
     throw new PeticionInvalida('E_SECRETO', 'El sitio no envió el secreto completo.');
   }
 
-  const { claroB64 } = await Signing.abrirSobre(
-    s.encrypted_key, s.iv, s.ciphertext, s.tag,
-    'Abrir tu secreto',
-    p.domain,
-  );
+  const { claroB64 } = await Signing.abrirSobre(s.encrypted_key, s.iv, s.ciphertext, s.tag);
   return textoDeB64(claroB64);
-}
-
-/**
- * base64 → texto UTF-8, sin depender de atob ni TextDecoder.
- * Contrastado contra Buffer.from(...,'utf8') con acentos y emoji.
- */
-function textoDeB64(b64: string): string {
-  const bytes = b64ABytes(b64);
-  let s = '';
-  for (let i = 0; i < bytes.length; i++) {
-    const b = bytes[i];
-    if (b < 0x80) s += String.fromCharCode(b);
-    else if (b < 0xe0) s += String.fromCharCode(((b & 31) << 6) | (bytes[++i] & 63));
-    else if (b < 0xf0) {
-      s += String.fromCharCode(((b & 15) << 12) | ((bytes[++i] & 63) << 6) | (bytes[++i] & 63));
-    } else {
-      const cp = ((b & 7) << 18) | ((bytes[++i] & 63) << 12) | ((bytes[++i] & 63) << 6) | (bytes[++i] & 63);
-      const u = cp - 0x10000;
-      s += String.fromCharCode(0xd800 + (u >> 10), 0xdc00 + (u & 1023));
-    }
-  }
-  return s;
 }
 
 // ── §14 la app devuelve el secreto, firmado y cifrado ───────────────────
@@ -345,13 +324,17 @@ export function canonicoDeLaRespuesta(r: RespuestaSecreto, domain: string): stri
 }
 
 /**
- * §13 y §14 — firma el secreto guardado, lo cifra para el dominio y lo entrega.
+ * §13 y §14 — lee la bóveda, firma el secreto y lo cifra para el dominio.
  *
- * El orden importa: primero firmar, luego cifrar. Al revés, la firma quedaría
- * fuera del sobre y cualquiera podría reenviarla con otro contenido.
- *
- * La firma ocurre dentro del chip y exige autenticación; el cifrado usa solo
- * la clave pública del dominio, así que no pide nada. Un único prompt.
+ * §10.1 — el orden es autenticar → leer la bóveda → firmar, y ese orden
+ * importa: la firma tiene que cubrir el secreto ya leído, así que hace falta
+ * tenerlo en claro antes de firmar. autenticar() desbloquea la ventana de
+ * validez de la clave de la bóveda; leer dentro de esa ventana no pide nada
+ * más. firmar() sigue pidiendo su propia autenticación por operación para la
+ * clave EC — es un mecanismo distinto, y en la práctica el usuario nota un
+ * solo gesto si ambas ocurren seguidas (ver generarBoveda() en el módulo
+ * nativo). El cifrado final usa solo la clave pública del dominio, así que
+ * no pide nada.
  */
 export async function entregarSecreto(
   p: Peticion, guardado: SecretoGuardado,
@@ -364,6 +347,12 @@ export async function entregarSecreto(
     );
   }
 
+  await Signing.autenticar('Devolver tu secreto', p.domain);
+  const { claroB64 } = await Signing.descifrarDeBoveda(
+    guardado.sobre.ivB64, guardado.sobre.cifradoB64, guardado.sobre.tagB64,
+  );
+  const secreto = textoDeB64(claroB64);
+
   const identidad = await Signing.identidad();
   const respuesta: RespuestaSecreto = {
     version: 1,
@@ -371,7 +360,7 @@ export async function entregarSecreto(
     nonce: p.nonce,
     domain_id: p.domain_id,
     app_id: identidad.keyId,
-    secret: guardado.secreto,
+    secret: secreto,
   };
 
   const { firmaDerB64 } = await Signing.firmar(
