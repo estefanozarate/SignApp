@@ -3,9 +3,11 @@ package io.sello.app.signing
 import android.content.Context
 import android.os.Build
 import android.security.keystore.KeyGenParameterSpec
+import android.security.keystore.KeyInfo
 import android.security.keystore.KeyPermanentlyInvalidatedException
 import android.security.keystore.KeyProperties
 import android.util.Base64
+import android.util.Log
 import androidx.biometric.BiometricManager
 import androidx.biometric.BiometricPrompt
 import androidx.core.content.ContextCompat
@@ -71,7 +73,7 @@ class SigningModule(private val ctx: ReactApplicationContext) : ReactContextBase
     private fun keystore(): KeyStore =
         KeyStore.getInstance(ANDROID_KEYSTORE).apply { load(null) }
 
-    // ── consulta ───────────────────────────────────────────────
+    // ── consulta ───────────────────────
 
     @ReactMethod
     fun tieneIdentidad(promesa: Promise) {
@@ -96,7 +98,7 @@ class SigningModule(private val ctx: ReactApplicationContext) : ReactContextBase
         }
     }
 
-    // ── creación ──────────────────────────────────────────────
+    // ── creación ──────────────────────
 
     /**
      * EC P-256, PURPOSE_SIGN, no exportable. Se intenta primero en StrongBox
@@ -271,7 +273,57 @@ class SigningModule(private val ctx: ReactApplicationContext) : ReactContextBase
         }
     }
 
-    // ── firma ─────────────────────────────────────────────────
+    // ── diagnóstico ──────────────────────────────
+
+    /**
+     * El AndroidKeyStore envuelve casi todos sus fallos en excepciones
+     * genéricas de JCE: IllegalBlockSizeException, InvalidKeyException. El
+     * motivo real ("Incompatible digest", "Key user not authenticated"…) está
+     * en la causa encadenada. Sin recorrerla, lo que llega a la interfaz es el
+     * nombre de la clase y nada más, que es como estar a ciegas — nos costó
+     * un ciclo entero de compilar e instalar para averiguarlo.
+     */
+    private fun causaDe(e: Throwable): String {
+        val partes = mutableListOf<String>()
+        var actual: Throwable? = e
+        var vueltas = 0
+        while (actual != null && vueltas < 6) {
+            val m = actual.message
+            partes.add(if (m.isNullOrBlank()) actual.javaClass.simpleName else "${actual.javaClass.simpleName}: $m")
+            actual = actual.cause
+            vueltas++
+        }
+        return partes.joinToString(" ← ")
+    }
+
+    /** Mensaje legible para la interfaz, y la traza completa al logcat. */
+    private fun fallo(etiqueta: String, e: Throwable): String {
+        Log.e("SelloSigning", etiqueta, e)
+        return causaDe(e)
+    }
+
+    /**
+     * Qué autoriza realmente la clave, según el chip. Es la comprobación
+     * directa de la sospecha de siempre: que el digest o el padding que pide
+     * la operación no estén entre los que se declararon al generarla.
+     */
+    private fun describirClave(alias: String, clave: java.security.PrivateKey) {
+        try {
+            val info = KeyFactory.getInstance(clave.algorithm, ANDROID_KEYSTORE)
+                .getKeySpec(clave, KeyInfo::class.java)
+            Log.i(
+                "SelloSigning",
+                "$alias: ${info.keySize} bits, digests=${info.digests.joinToString()}, " +
+                    "paddings=${info.encryptionPaddings.joinToString()}, " +
+                    "enHardware=${info.isInsideSecureHardware}, " +
+                    "autenticacion=${info.isUserAuthenticationRequired}",
+            )
+        } catch (e: Exception) {
+            Log.w("SelloSigning", "no se pudo leer KeyInfo de $alias: ${e.message}")
+        }
+    }
+
+    // ── firma ────────────────────────
 
     /**
      * El reto llega en base64 y se firma dentro del chip. El texto del prompt
@@ -320,7 +372,7 @@ class SigningModule(private val ctx: ReactApplicationContext) : ReactContextBase
                                 putString("keyId", keyId)
                             })
                         } catch (e: Exception) {
-                            promesa.reject("E_FIRMA", e.message, e)
+                            promesa.reject("E_FIRMA", fallo("firmar", e), e)
                         }
                     }
 
@@ -352,7 +404,7 @@ class SigningModule(private val ctx: ReactApplicationContext) : ReactContextBase
         }
     }
 
-    // ── descifrado ────────────────────────────────────────────
+    // ── descifrado ────────────────────────────
 
     /**
      * §10 — abre un sobre cifrado híbrido, todo dentro del módulo nativo.
@@ -394,9 +446,20 @@ class SigningModule(private val ctx: ReactApplicationContext) : ReactContextBase
         }
         val (claveEnvuelta, iv, cifrado, tag) = partes
 
+        // Los tamaños delatan la mitad de los fallos: la clave envuelta tiene que
+        // medir exactamente lo que el módulo RSA (256 bytes con RSA-2048), el IV
+        // 12 y el tag 16. Si alguno no cuadra, el problema está en el transporte
+        // o en el emisor, no en el chip.
+        Log.i(
+            "SelloSigning",
+            "abrirSobre: claveEnvuelta=${claveEnvuelta.size}B iv=${iv.size}B " +
+                "cifrado=${cifrado.size}B tag=${tag.size}B",
+        )
+
         val cipher: Cipher = try {
             val entrada = keystore().getEntry(ALIAS_CIFRADO, null) as? KeyStore.PrivateKeyEntry
                 ?: run { promesa.reject("E_SIN_IDENTIDAD", "No hay clave de cifrado."); return }
+            describirClave(ALIAS_CIFRADO, entrada.privateKey)
             Cipher.getInstance("RSA/ECB/OAEPPadding").apply {
                 init(
                     Cipher.DECRYPT_MODE,
@@ -409,7 +472,7 @@ class SigningModule(private val ctx: ReactApplicationContext) : ReactContextBase
         } catch (e: KeyPermanentlyInvalidatedException) {
             promesa.reject("E_KEY_INVALIDATED", "La biometría del dispositivo cambió.", e); return
         } catch (e: Exception) {
-            promesa.reject("E_KEYSTORE", e.message, e); return
+            promesa.reject("E_KEYSTORE", fallo("abrirSobre/init", e), e); return
         }
 
         actividad.runOnUiThread {
@@ -452,7 +515,7 @@ class SigningModule(private val ctx: ReactApplicationContext) : ReactContextBase
                         } catch (e: Exception) {
                             // Un fallo aquí suele ser padding: el emisor cifró con
                             // otros parámetros OAEP que los que espera esta clave.
-                            promesa.reject("E_DESCIFRADO", e.message, e)
+                            promesa.reject("E_DESCIFRADO", fallo("abrirSobre", e), e)
                         } finally {
                             // La clave AES no tiene por qué seguir en memoria.
                             claveAes?.fill(0)
@@ -483,7 +546,7 @@ class SigningModule(private val ctx: ReactApplicationContext) : ReactContextBase
         }
     }
 
-    // ── cifrado ──────────────────────────────────────────────
+    // ── cifrado ────────────────────────
 
     /**
      * §14 — cierra un sobre cifrado para el dominio. El inverso de abrirSobre().
@@ -569,7 +632,7 @@ class SigningModule(private val ctx: ReactApplicationContext) : ReactContextBase
                 putString("tagB64", b64(tag))
             })
         } catch (e: Exception) {
-            promesa.reject("E_CIFRADO", e.message, e)
+            promesa.reject("E_CIFRADO", fallo("cerrarSobre", e), e)
         } finally {
             // El claro sigue en JavaScript, pero la clave AES no tiene por qué
             // seguir en memoria aquí.
@@ -577,7 +640,7 @@ class SigningModule(private val ctx: ReactApplicationContext) : ReactContextBase
         }
     }
 
-    // ── borrado ──────────────────────────────────────────────
+    // ── borrado ────────────────────────
 
     @ReactMethod
     fun borrarIdentidad(promesa: Promise) {
