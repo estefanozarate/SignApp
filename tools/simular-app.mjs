@@ -21,8 +21,10 @@ import {
 } from 'node:crypto';
 
 const DOMINIO = process.env.DOMINIO ?? 'http://127.0.0.1:8787';
+// Tiene que coincidir con el del servidor: MGF1=sha256 en los dos, o en ninguno.
+const MGF1_APP = process.env.MGF1 === 'sha256' ? 'sha256' : 'sha1';
 
-// ── identidad simulada de la app (§3.1) ─────────────────────────────
+// ── identidad simulada de la app (§3.1) ───────────────────────────────────
 // Dos claves, igual que en el chip: EC para firmar, RSA para recibir.
 const firma = generateKeyPairSync('ec', { namedCurve: 'prime256v1' });
 const cifrado = generateKeyPairSync('rsa', { modulusLength: 2048 });
@@ -96,7 +98,7 @@ function comprobar(nombre, condicion, detalle = '') {
   if (!condicion) fallos++;
 }
 
-// ── §10 emparejar y recibir el secreto ──────────────────────────────
+// ── §10 emparejar y recibir el secreto ────────────────────────────────────
 async function emparejar() {
   const c = await pedir('PAIR');
   const p = await verificar(c.qr);
@@ -120,7 +122,7 @@ async function abrirSobre(sobre) {
     key: cifrado.privateKey,
     padding: constants.RSA_PKCS1_OAEP_PADDING,
     oaepHash: 'sha256',
-    mgf1Hash: 'sha1',
+    mgf1Hash: MGF1_APP,
   }, Buffer.from(sobre.encrypted_key, 'base64'));
   const d = createDecipheriv('aes-256-gcm', clave, Buffer.from(sobre.iv, 'base64'));
   d.setAuthTag(Buffer.from(sobre.tag, 'base64'));
@@ -129,7 +131,7 @@ async function abrirSobre(sobre) {
   ]).toString('utf8');
 }
 
-// ── §14 devolver el secreto firmado y cifrado ─────────────────────────
+// ── §14 devolver el secreto firmado y cifrado ─────────────────────────────
 async function devolver(secreto, { estropear } = {}) {
   const c = await pedir('SECRET_REQUEST');
   const p = await verificar(c.qr);
@@ -155,7 +157,7 @@ async function devolver(secreto, { estropear } = {}) {
   return responder(p, { type: 'SECRET_RESPONSE', version: 1, envelope: sobre });
 }
 
-console.log(`Dominio ${DOMINIO}\napp_id  ${APP_ID}\n`);
+console.log(`Dominio ${DOMINIO}\napp_id  ${APP_ID}\nMGF1    ${MGF1_APP}\n`);
 
 const { sobre } = await emparejar();
 const secreto = await abrirSobre(sobre);
@@ -169,7 +171,7 @@ console.log(`        secreto ${huella(secreto)}…\n`);
   comprobar('y el secreto coincide con el que entregó', cuerpo.matches === true);
 }
 
-// ── §24 lo que debe rechazar ─────────────────────────────────────
+// ── §24 lo que debe rechazar ──────────────────────────────────────────────
 console.log('\nCasos que deben fallar:');
 {
   const { codigo } = await devolver('secreto-inventado');
