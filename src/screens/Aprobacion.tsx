@@ -12,6 +12,7 @@ import {
 import { guardar, paraDominio, SecretoGuardado } from '../services/boveda';
 import { BiometriaCancelada, ClaveInvalidada, SecretoAlterado, Signing } from '../native/Signing';
 import { anotar } from '../services/actividad';
+import { bytesAB64, textoABytes } from '../lib/aleatorio';
 import { retoLegible } from '../lib/b64';
 import { Rutas } from '../navigation/tipos';
 
@@ -93,18 +94,21 @@ export default function Aprobacion({ navigation, route }: Props) {
 
     resuelto.current = true;
 
-    // §10 — el secreto llega cifrado en la propia respuesta al emparejamiento.
-    // Se abre DENTRO del chip y se guarda ligado a la identidad del dominio.
-    // Pide autenticación otra vez: firmar y descifrar son dos operaciones
-    // distintas del Keystore, cada una con su propio permiso.
+    // §10 — el secreto llega cifrado en la propia respuesta al emparejamiento
+    // y se abre DENTRO del chip sin pedir nada (§10.1: lo autorizó la prueba
+    // de posesión de arriba). §10.1/§11 — guardarlo sí pide autenticación:
+    // se cifra de nuevo, esta vez con la clave AES-GCM de la bóveda, y solo
+    // el sobre resultante llega al almacenamiento del teléfono.
     let secretoRecibido = false;
     if (secret) {
       const claro = await abrirSecreto(secret, peticion);
+      await Signing.autenticar('Guardar tu secreto', peticion.domain);
+      const sobre = await Signing.cifrarEnBoveda(bytesAB64(textoABytes(claro)));
       await guardar({
         domain: peticion.domain,
         domain_id: peticion.domain_id,
         domain_public_key: peticion.domain_public_key,
-        secreto: claro,
+        sobre,
       });
       secretoRecibido = true;
     }

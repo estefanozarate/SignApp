@@ -7,6 +7,8 @@ import { Boton, Ceja, Minima, Tarjeta } from '../components/ui';
 import { Atras } from '../components/Iconos';
 import { color, espacio, radio, tipo } from '../theme';
 import { olvidarDominio, SecretoGuardado, secretos } from '../services/boveda';
+import { BiometriaCancelada, Signing } from '../native/Signing';
+import { textoDeB64 } from '../lib/b64';
 import { Rutas } from '../navigation/tipos';
 
 type Props = NativeStackScreenProps<Rutas, 'Boveda'>;
@@ -14,18 +16,49 @@ type Props = NativeStackScreenProps<Rutas, 'Boveda'>;
 export default function Boveda({ navigation }: Props) {
   const [lista, setLista] = useState<SecretoGuardado[]>([]);
   const [visibles, setVisibles] = useState<string[]>([]);
+  // §10.1 — el claro solo vive aquí, en memoria, mientras la tarjeta está
+  // abierta. Nunca se guarda descifrado; al ocultar se olvida y hay que
+  // volver a autenticar para verlo otra vez.
+  const [claros, setClaros] = useState<Record<string, string>>({});
+  const [cargando, setCargando] = useState<string | null>(null);
 
   const recargar = useCallback(() => { secretos().then(setLista); }, []);
   useFocusEffect(recargar);
 
   /**
-   * Los secretos no se muestran de entrada. No es teatro: evita que queden
-   * a la vista de quien mire la pantalla por encima del hombro, y obliga a
-   * un gesto deliberado para revelarlos.
+   * §10.1, punto 6 — revelar un secreto pide autenticación de verdad. Antes
+   * este gesto solo alternaba un booleano local; ahora, la primera vez que
+   * se pide ver un secreto, hay que pasar por autenticar() y descifrarlo de
+   * la bóveda. Ocultarlo no requiere nada, pero borra el claro de memoria:
+   * volver a mostrarlo vuelve a pedir autenticación.
    */
-  const alternar = (domainId: string) => {
-    LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
-    setVisibles(v => (v.includes(domainId) ? v.filter(d => d !== domainId) : [...v, domainId]));
+  const alternar = async (s: SecretoGuardado) => {
+    if (visibles.includes(s.domain_id)) {
+      LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+      setVisibles(v => v.filter(d => d !== s.domain_id));
+      setClaros(c => {
+        const resto = { ...c };
+        delete resto[s.domain_id];
+        return resto;
+      });
+      return;
+    }
+
+    setCargando(s.domain_id);
+    try {
+      await Signing.autenticar('Revelar tu secreto', s.domain);
+      const { claroB64 } = await Signing.descifrarDeBoveda(
+        s.sobre.ivB64, s.sobre.cifradoB64, s.sobre.tagB64,
+      );
+      LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+      setClaros(c => ({ ...c, [s.domain_id]: textoDeB64(claroB64) }));
+      setVisibles(v => [...v, s.domain_id]);
+    } catch (e: any) {
+      if (e instanceof BiometriaCancelada) return;
+      Alert.alert('No se pudo revelar', e?.message ?? 'Error desconocido.');
+    } finally {
+      setCargando(null);
+    }
   };
 
   const olvidar = (s: SecretoGuardado) => {
@@ -66,9 +99,9 @@ export default function Boveda({ navigation }: Props) {
               <Tarjeta key={s2.domain_id} style={{ marginBottom: 12 }}>
                 <Ceja style={{ marginBottom: 8 }}>{s2.domain}</Ceja>
 
-                <Pressable onPress={() => alternar(s2.domain_id)} style={s.valor}>
+                <Pressable onPress={() => alternar(s2)} style={s.valor}>
                   <Text style={[tipo.mono, { color: visible ? color.tinta : color.grafito }]}>
-                    {visible ? s2.secreto : '·'.repeat(Math.min(28, s2.secreto.length))}
+                    {visible ? claros[s2.domain_id] ?? '' : '·'.repeat(24)}
                   </Text>
                 </Pressable>
 
@@ -78,9 +111,9 @@ export default function Boveda({ navigation }: Props) {
                       day: 'numeric', month: 'short', year: 'numeric',
                     })}
                   </Minima>
-                  <Pressable onPress={() => alternar(s2.domain_id)}>
+                  <Pressable onPress={() => alternar(s2)} disabled={cargando === s2.domain_id}>
                     <Minima style={{ color: color.intaglio, textDecorationLine: 'underline' }}>
-                      {visible ? 'Ocultar' : 'Mostrar'}
+                      {cargando === s2.domain_id ? 'Comprobando…' : visible ? 'Ocultar' : 'Mostrar'}
                     </Minima>
                   </Pressable>
                 </View>
@@ -97,8 +130,8 @@ export default function Boveda({ navigation }: Props) {
         )}
 
         <Minima style={{ marginTop: 14 }}>
-          Estos secretos se guardan en el almacenamiento privado de la app, ya descifrados.
-          A diferencia de tu identidad, no están dentro del chip seguro.
+          Estos secretos se guardan cifrados en el almacenamiento privado de la app, con una
+          clave que vive en el chip seguro y exige tu PIN o tu huella para leerlos.
         </Minima>
         <View style={{ height: 30 }} />
       </ScrollView>
