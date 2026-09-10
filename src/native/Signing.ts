@@ -1,7 +1,7 @@
 import { NativeModules } from 'react-native';
 
 /**
- * Puente al Keystore de Android (§3.1 y §10 de diseno_app.md).
+ * Puente al Keystore de Android (§3.1 y §10/§10.1 de diseno_app.md).
  * Las claves privadas nunca cruzan este puente: solo salen firmas, claves
  * públicas y texto ya descifrado.
  */
@@ -9,10 +9,11 @@ type SigningNative = {
   /** ¿Existe ya una identidad de firma en este dispositivo? */
   tieneIdentidad(): Promise<boolean>;
   /**
-   * Genera EC P-256 (firma) y RSA-2048 (descifrado) en AndroidKeyStore con:
-   *   setUserAuthenticationRequired(true)
-   *   setInvalidatedByBiometricEnrollment(true)
-   *   no exportables, StrongBox si el equipo lo tiene.
+   * Genera EC P-256 (firma), RSA-2048 (descifrado del sobre §10) y
+   * AES-256-GCM (bóveda local, §10.1) en AndroidKeyStore. La EC va
+   * gateada por biometría por operación; la RSA no pide autenticación
+   * (§10.1); la AES pide autenticación por ventana de validez.
+   * Ninguna es exportable, y StrongBox se usa si el equipo lo tiene.
    */
   crearIdentidad(): Promise<Identidad>;
   /** Metadatos públicos de la identidad ya creada. */
@@ -23,12 +24,13 @@ type SigningNative = {
    */
   firmar(retoB64: string, titulo: string, subtitulo: string): Promise<Firma>;
   /**
-   * §10 — abre un sobre cifrado híbrido dentro del chip, tras autenticación.
-   * Ni la privada RSA ni la clave AES cruzan el puente: solo sale el claro.
+   * §10 / §10.1 — abre un sobre cifrado híbrido dentro del chip. Sin
+   * autenticación: lo que autoriza recibir el secreto es la prueba de
+   * posesión que ya se envió (pruebaDePosesion), no este paso. Ni la
+   * privada RSA ni la clave AES cruzan el puente: solo sale el claro.
    */
   abrirSobre(
     claveEnvueltaB64: string, ivB64: string, cifradoB64: string, tagB64: string,
-    titulo: string, subtitulo: string,
   ): Promise<{ claroB64: string }>;
   /**
    * §14 — cierra un sobre cifrado para la clave pública del dominio. No pide
@@ -36,6 +38,23 @@ type SigningNative = {
    * firma que va dentro.
    */
   cerrarSobre(clavePublicaSpkiB64: string, claroB64: string): Promise<Sobre>;
+  /**
+   * §10.1 — autenticación "a secas", sin CryptoObject: confirma al usuario y
+   * desbloquea, durante unos segundos, las claves con ventana de validez
+   * (hoy, solo la bóveda). Se llama antes de cifrarEnBoveda()/
+   * descifrarDeBoveda().
+   */
+  autenticar(titulo: string, subtitulo: string): Promise<void>;
+  /** §10.1/§11 — cifra un dato para guardarlo en la bóveda local. */
+  cifrarEnBoveda(claroB64: string): Promise<SobreBoveda>;
+  /** §10.1/§14 — el inverso: lee un secreto ya guardado en la bóveda. */
+  descifrarDeBoveda(ivB64: string, cifradoB64: string, tagB64: string): Promise<{ claroB64: string }>;
+  /**
+   * §10.1, punto 7 — mide, con una operación real y autenticada, que
+   * AES-GCM con clave ligada a autenticación funciona en este equipo. No
+   * toca la bóveda real: usa una clave temporal con los mismos parámetros.
+   */
+  probarBoveda(titulo: string, subtitulo: string): Promise<{ funciona: boolean; detalle: string }>;
   /** Borra las claves del Keystore. Irreversible. */
   borrarIdentidad(): Promise<void>;
 };
@@ -48,13 +67,6 @@ export type Identidad = {
   clavePublicaCifradoSpkiB64?: string;
   /** MGF1 va con SHA-1 aunque el hash de OAEP sea SHA-256: el Keystore no admite otra cosa. */
   algoritmoCifrado?: 'RSA-OAEP-256-MGF1SHA1';
-  /**
-   * true: cada descifrado exige autenticación (§10 en su forma fuerte).
-   * false: el equipo no tiene biometría fuerte y la clave usa una ventana de
-   * validez de un segundo. Sigue exigiendo autenticación, pero no una por
-   * operación.
-   */
-  cifradoPorOperacion?: boolean;
   strongBox: boolean;
   creadaEn: number;
   /** Cadena de key attestation para que un verificador compruebe el origen hardware. */
@@ -72,10 +84,15 @@ export type Sobre = {
   tagB64: string;
 };
 
+/** §10.1 — sobre AES-GCM local de la bóveda; sin clave envuelta, porque la clave es del Keystore. */
+export type SobreBoveda = { ivB64: string; cifradoB64: string; tagB64: string };
+
 export class ClaveInvalidada extends Error {}
 /** GCM detectó que el dato llegó alterado: no se devuelve nada a medias. */
 export class SecretoAlterado extends Error {}
 export class BiometriaCancelada extends Error {}
+/** §10.1 — la ventana de validez de la bóveda expiró; hay que llamar a autenticar() otra vez. */
+export class SinAutenticar extends Error {}
 
 const nativo = NativeModules.SelloSigning as SigningNative;
 
@@ -85,6 +102,7 @@ function traducir(e: any): never {
   }
   if (e?.code === 'E_USER_CANCELED') throw new BiometriaCancelada('Cancelado por el usuario.');
   if (e?.code === 'E_ALTERADO') throw new SecretoAlterado('El secreto llegó alterado.');
+  if (e?.code === 'E_SIN_AUTENTICAR') throw new SinAutenticar('Hay que autenticar de nuevo.');
   throw e;
 }
 
@@ -94,12 +112,16 @@ export const Signing = {
   crearIdentidad: () => nativo.crearIdentidad().catch(traducir),
   firmar: (retoB64: string, titulo: string, subtitulo: string) =>
     nativo.firmar(retoB64, titulo, subtitulo).catch(traducir),
-  abrirSobre: (
-    claveEnvueltaB64: string, ivB64: string, cifradoB64: string, tagB64: string,
-    titulo: string, subtitulo: string,
-  ) => nativo.abrirSobre(claveEnvueltaB64, ivB64, cifradoB64, tagB64, titulo, subtitulo)
-    .catch(traducir),
+  abrirSobre: (claveEnvueltaB64: string, ivB64: string, cifradoB64: string, tagB64: string) =>
+    nativo.abrirSobre(claveEnvueltaB64, ivB64, cifradoB64, tagB64).catch(traducir),
   cerrarSobre: (clavePublicaSpkiB64: string, claroB64: string) =>
     nativo.cerrarSobre(clavePublicaSpkiB64, claroB64).catch(traducir),
+  autenticar: (titulo: string, subtitulo: string) =>
+    nativo.autenticar(titulo, subtitulo).catch(traducir),
+  cifrarEnBoveda: (claroB64: string) => nativo.cifrarEnBoveda(claroB64).catch(traducir),
+  descifrarDeBoveda: (ivB64: string, cifradoB64: string, tagB64: string) =>
+    nativo.descifrarDeBoveda(ivB64, cifradoB64, tagB64).catch(traducir),
+  probarBoveda: (titulo: string, subtitulo: string) =>
+    nativo.probarBoveda(titulo, subtitulo).catch(traducir),
   borrarIdentidad: () => nativo.borrarIdentidad(),
 };
