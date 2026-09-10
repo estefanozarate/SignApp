@@ -20,6 +20,8 @@ export default function Dispositivo({ navigation }: Props) {
   const [borrando, setBorrando] = useState(false);
   const [firmando, setFirmando] = useState(false);
   const [prueba, setPrueba] = useState<{ reto: string; firma: string } | null>(null);
+  const [probandoBoveda, setProbandoBoveda] = useState(false);
+  const [resultadoBoveda, setResultadoBoveda] = useState<{ funciona: boolean; detalle: string } | null>(null);
 
   /**
    * Aprobación de prueba: recorre de punta a punta la cadena del chip —
@@ -49,6 +51,29 @@ export default function Dispositivo({ navigation }: Props) {
       Alert.alert('No se pudo completar', e?.message ?? 'Error desconocido.');
     } finally {
       setFirmando(false);
+    }
+  };
+
+  /**
+   * §10.1, punto 7 — mide, en vez de dar por bueno, que AES-GCM con clave
+   * autenticada funciona en este equipo: la misma pregunta que se le hizo a
+   * RSA (y que resultó negativa en la SM-T545), pero para la bóveda. No usa
+   * la bóveda real: genera una clave temporal con los mismos parámetros.
+   */
+  const comprobarBoveda = async () => {
+    setProbandoBoveda(true);
+    setResultadoBoveda(null);
+    try {
+      const r = await Signing.probarBoveda(
+        'Comprobar la bóveda',
+        'Cifra y descifra una prueba con una clave autenticada',
+      );
+      setResultadoBoveda(r);
+    } catch (e: any) {
+      if (e instanceof BiometriaCancelada) return;
+      Alert.alert('No se pudo comprobar', e?.message ?? 'Error desconocido.');
+    } finally {
+      setProbandoBoveda(false);
     }
   };
 
@@ -115,6 +140,26 @@ export default function Dispositivo({ navigation }: Props) {
         <Minima style={{ marginTop: 10, marginBottom: 30 }}>
           Genera una petición local y la aprueba dentro del chip. Nada sale del dispositivo:
           sirve para confirmar que la identidad sigue viva y que pide tu huella o tu PIN.
+        </Minima>
+
+        <Ceja style={{ marginBottom: 10 }}>Comprobar la bóveda</Ceja>
+        <Boton variante="fantasma" cargando={probandoBoveda} deshabilitado={!identidad} onPress={comprobarBoveda}>
+          Probar la bóveda con una clave autenticada
+        </Boton>
+        {resultadoBoveda ? (
+          <Tarjeta style={{ marginTop: 12 }}>
+            <Fila etiqueta="Resultado" primera>
+              {resultadoBoveda.funciona ? 'Funciona' : 'No funciona'}
+            </Fila>
+            {!resultadoBoveda.funciona && resultadoBoveda.detalle ? (
+              <Fila etiqueta="Detalle"><Mono>{resultadoBoveda.detalle}</Mono></Fila>
+            ) : null}
+          </Tarjeta>
+        ) : null}
+        <Minima style={{ marginTop: 10, marginBottom: 30 }}>
+          Cifra y descifra un dato de prueba con una clave temporal, ligada a autenticación,
+          igual que la de la bóveda real. Mide el supuesto del que depende guardar tus
+          secretos en vez de darlo por bueno.
         </Minima>
 
         <Ceja style={{ marginBottom: 10 }}>Retirar el dispositivo</Ceja>
