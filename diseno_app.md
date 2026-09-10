@@ -386,6 +386,109 @@ WEB ═════════════ WebRTC ═════════�
 
 The App decrypts it with its private key and stores the secret locally.
 
+
+---
+
+# 10.1. Excepción de implementación: autenticación en la entrega y lectura del secreto (App Android)
+
+> Añadido tras la implementación de la Fase 4 en la app Android de referencia
+> (React Native + Kotlin), al toparse con una limitación real de hardware. No
+> cambia ninguna propiedad de seguridad del §18; mueve DÓNDE se pide la
+> autenticación del usuario dentro del mismo conjunto de pasos.
+
+## Qué se comprobó
+
+En al menos un dispositivo de referencia (Samsung SM-T545, sin sensor de
+huella — solo PIN y reconocimiento facial Class 2), el Keymaster de Android
+no completa un descifrado RSA-OAEP cuando la clave privada está ligada a
+autenticación de usuario, ni con autenticación por operación (`CryptoObject`,
+timeout 0) ni con ventana de validez. La operación falla con
+`IllegalBlockSizeException`, cuya causa encadenada es un `KeyStoreException`
+"Unknown error" — sin más detalle.
+
+Un diagnóstico dedicado (que genera una clave RSA temporal con los mismos
+parámetros pero SIN autenticación, y prueba las combinaciones de digest/MGF1
+contra ella) demuestra que OAEP-SHA256 con MGF1-SHA1 es la combinación
+correcta y funciona sin autenticación. El fallo es específicamente la
+combinación "descifrado RSA + clave ligada a autenticación" en este
+Keymaster, no el esquema criptográfico en sí.
+
+## Qué cambia
+
+**§10 (Web → App Secret Transfer).** El documento nunca exigió autenticación
+en el paso de abrir el sobre — solo que la clave privada no salga del
+dispositivo (§3.1). La implementación de referencia sí la pedía, y es esa
+adición la que se retira:
+
+- La clave RSA de descifrado se genera SIN `setUserAuthenticationRequired`.
+  Sigue sin ser exportable y sigue viviendo en el Keystore (StrongBox si el
+  equipo lo tiene); lo único que cambia es que no exige un prompt biométrico
+  para usarse.
+- Abrir el sobre (desenvolver la clave AES con RSA-OAEP y descifrar el dato
+  con AES-GCM) ya no muestra `BiometricPrompt`. Lo que autoriza este paso es
+  la firma de la prueba de posesión (§7), que se generó un instante antes
+  usando la clave EC de identidad — esa sí sigue exigiendo autenticación por
+  operación, sin cambios.
+
+**§11 (Local Secret Storage).** Se corrige además un incumplimiento
+preexistente: el documento pide que la bóveda guarde `encrypted_secret`, y la
+implementación de referencia guardaba el secreto ya en claro. Ahora:
+
+- Hay una clave adicional en el Keystore, AES-256-GCM, dedicada
+  exclusivamente a la bóveda local. A diferencia de la clave RSA de arriba,
+  ESTA SÍ exige autenticación de usuario — con ventana de validez (no por
+  operación), lo bastante amplia para cubrir una autenticación seguida de
+  leer o escribir la bóveda sin pedir un segundo prompt para esa operación
+  concreta.
+- Cada registro de la bóveda guarda el secreto como un sobre cifrado
+  (`{iv, ciphertext, tag}`) con esa clave, nunca en claro. Los metadatos de
+  identidad del dominio (`domain_id`, `domain`, `domain_public_key`) siguen
+  en claro a propósito: el §13 necesita compararlos para decidir si rechaza
+  una petición cruzada, y esa comprobación no debe exigir autenticación.
+- Revelar un secreto guardado (por ejemplo, en una pantalla de "mis
+  secretos") exige la misma autenticación por ventana. Antes de esta
+  corrección, un secreto ya guardado en claro se revelaba con un simple
+  gesto en la interfaz, sin nueva comprobación.
+
+**§14 (App → Web Secret Transfer).** El orden de operaciones para devolver un
+secreto es ahora: autenticar → leer el secreto de la bóveda → firmar. La
+firma debe cubrir el secreto tal y como se leyó, así que necesariamente hace
+falta tenerlo en claro antes de firmar; leerlo antes de autenticar rompería
+la garantía de la bóveda. El cifrado final del sobre para el dominio usa solo
+la clave pública del dominio y no requiere autenticación adicional.
+
+## Qué NO cambia
+
+- La clave privada de identidad (EC, firma) sigue exigiendo autenticación por
+  operación, sin ninguna excepción. Es la que produce la prueba de posesión y
+  la firma de la respuesta del §14; ninguna de las dos garantías se relajó.
+- El secreto sigue sin transmitirse nunca en plano por la red (§10, §14): la
+  excepción de este apartado es puramente local, sobre cuándo el dispositivo
+  pide un gesto de autenticación al usuario, no sobre qué cruza la red.
+- Ningún dato en claro — secreto, clave AES intermedia, clave privada — cruza
+  el puente entre el módulo nativo y la capa de aplicación salvo el texto ya
+  descifrado que el propio flujo necesita mostrar o reenviar cifrado.
+
+## Alcance de la excepción
+
+Esta es una excepción de IMPLEMENTACIÓN para un Keymaster concreto que no
+soporta un caso de uso permitido por la especificación de Android, no un
+cambio al protocolo en sí. Una implementación en un dispositivo o plataforma
+donde el descifrado RSA con clave autenticada SÍ funcione puede conservar la
+autenticación en el paso de abrir el sobre sin violar este documento; lo que
+no debe hacer ninguna implementación es guardar el secreto sin cifrar en el
+almacenamiento local, con independencia de si el paso de recepción pide o no
+autenticación.
+
+Queda pendiente, y fuera del alcance de esta corrección, medir con datos de
+más de un modelo de dispositivo si el fallo es específico de este chip o más
+extendido; el diagnóstico que lo detectó (comparación con/sin autenticación
+sobre una clave temporal) quedó incorporado al código como herramienta de
+regresión, junto con un diagnóstico equivalente para AES-GCM con clave
+autenticada — la ruta de la que depende la bóveda de este apartado — porque
+un supuesto de compatibilidad de hardware conviene medirlo, no darlo por
+bueno.
+
 ---
 
 # 11. Local Secret Storage
