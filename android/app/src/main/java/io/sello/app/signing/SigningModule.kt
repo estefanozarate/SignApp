@@ -71,10 +71,15 @@ class SigningModule(private val ctx: ReactApplicationContext) : ReactContextBase
 
         /**
          * Segundos de validez de la clave de cifrado en equipos SIN biometría
-         * fuerte. Ver generarCifrado(): es una degradación consciente del §10,
-         * y por eso el valor es el mínimo que el sistema acepta.
+         * fuerte. Ver generarCifrado(): es una degradación consciente del §10.
+         *
+         * Empezó siendo 1, por no debilitar la garantía más de lo justo, y no
+         * funcionaba: entre que el usuario teclea el PIN y llega el doFinal
+         * pasan cerca de dos segundos, así que la ventana expiraba antes de la
+         * operación. Diez da unas cinco veces ese margen sin dejar la clave
+         * utilizable durante un rato largo.
          */
-        const val VENTANA_SIN_BIOMETRIA = 1
+        const val VENTANA_SIN_BIOMETRIA = 10
     }
 
     private val prefs by lazy { ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE) }
@@ -82,7 +87,7 @@ class SigningModule(private val ctx: ReactApplicationContext) : ReactContextBase
     private fun keystore(): KeyStore =
         KeyStore.getInstance(ANDROID_KEYSTORE).apply { load(null) }
 
-    // ── consulta ──────────────────────
+    // ── consulta ──────────────────────────────────────────
 
     @ReactMethod
     fun tieneIdentidad(promesa: Promise) {
@@ -107,7 +112,7 @@ class SigningModule(private val ctx: ReactApplicationContext) : ReactContextBase
         }
     }
 
-    // ── creación ─────────────────────
+    // ── creación ─────────────────────────────────────────
 
     /**
      * EC P-256, PURPOSE_SIGN, no exportable. Se intenta primero en StrongBox
@@ -308,7 +313,7 @@ class SigningModule(private val ctx: ReactApplicationContext) : ReactContextBase
         }
     }
 
-    // ── diagnóstico ───────────────────────
+    // ── diagnóstico ──────────────────────────────────────
 
     /**
      * El AndroidKeyStore envuelve casi todos sus fallos en excepciones
@@ -443,7 +448,7 @@ class SigningModule(private val ctx: ReactApplicationContext) : ReactContextBase
         }
     }
 
-    // ── firma ─────────────────────
+    // ── firma ────────────────────────────────────────────
 
     /**
      * El reto llega en base64 y se firma dentro del chip. El texto del prompt
@@ -524,7 +529,7 @@ class SigningModule(private val ctx: ReactApplicationContext) : ReactContextBase
         }
     }
 
-    // ── descifrado ──────────────────────
+    // ── descifrado ───────────────────────────────────────
 
     /**
      * §10 — abre un sobre cifrado híbrido, todo dentro del módulo nativo.
@@ -566,6 +571,13 @@ class SigningModule(private val ctx: ReactApplicationContext) : ReactContextBase
         }
         val (claveEnvuelta, iv, cifrado, tag) = partes
 
+        // Con ventana de validez la clave NO admite CryptoObject: hay que
+        // autenticar a secas y usar la instancia de Cipher normal. Pasarle el
+        // CryptoObject haría fallar el propio prompt.
+        val porOperacion = prefs.getBoolean(PREF_POR_OPERACION, true)
+        val modo = if (porOperacion) "por operacion (CryptoObject)"
+            else "ventana de ${VENTANA_SIN_BIOMETRIA}s (sin CryptoObject)"
+
         // Los tamaños delatan la mitad de los fallos: la clave envuelta tiene que
         // medir exactamente lo que el módulo RSA (256 bytes con RSA-2048), el IV
         // 12 y el tag 16. Si alguno no cuadra, el problema está en el transporte
@@ -573,7 +585,7 @@ class SigningModule(private val ctx: ReactApplicationContext) : ReactContextBase
         Log.i(
             "SelloSigning",
             "abrirSobre: claveEnvuelta=${claveEnvuelta.size}B iv=${iv.size}B " +
-                "cifrado=${cifrado.size}B tag=${tag.size}B",
+                "cifrado=${cifrado.size}B tag=${tag.size}B, modo=$modo",
         )
 
         val cipher: Cipher = try {
@@ -659,11 +671,6 @@ class SigningModule(private val ctx: ReactApplicationContext) : ReactContextBase
                 },
             )
 
-            // Con ventana de validez, la clave NO admite CryptoObject: hay que
-            // autenticar a secas y usar la instancia de Cipher normal. Pasarle
-            // el CryptoObject haría fallar el propio prompt.
-            val porOperacion = prefs.getBoolean(PREF_POR_OPERACION, true)
-
             val info = BiometricPrompt.PromptInfo.Builder()
                 .setTitle(titulo)
                 .setSubtitle(subtitulo)
@@ -690,7 +697,7 @@ class SigningModule(private val ctx: ReactApplicationContext) : ReactContextBase
         }
     }
 
-    // ── cifrado ─────────────────────
+    // ── cifrado ──────────────────────────────────────────
 
     /**
      * §14 — cierra un sobre cifrado para el dominio. El inverso de abrirSobre().
@@ -784,7 +791,7 @@ class SigningModule(private val ctx: ReactApplicationContext) : ReactContextBase
         }
     }
 
-    // ── borrado ─────────────────────
+    // ── borrado ──────────────────────────────────────────
 
     @ReactMethod
     fun borrarIdentidad(promesa: Promise) {
