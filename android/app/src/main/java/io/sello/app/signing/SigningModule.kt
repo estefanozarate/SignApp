@@ -56,6 +56,7 @@ class SigningModule(private val ctx: ReactApplicationContext) : ReactContextBase
     private companion object {
         const val ALIAS = "sello.identidad.v1"
         const val ALIAS_CIFRADO = "sello.cifrado.v1"
+        const val ALIAS_DIAG = "sello.diagnostico.v1"
         const val PREFS = "sello.identidad"
         const val PREF_KEY_ID = "key_id"
         const val PREF_CREADA = "creada_en"
@@ -73,7 +74,7 @@ class SigningModule(private val ctx: ReactApplicationContext) : ReactContextBase
     private fun keystore(): KeyStore =
         KeyStore.getInstance(ANDROID_KEYSTORE).apply { load(null) }
 
-    // ── consulta ───────────────────────
+    // ── consulta ───────────────────────────────────────────
 
     @ReactMethod
     fun tieneIdentidad(promesa: Promise) {
@@ -98,7 +99,7 @@ class SigningModule(private val ctx: ReactApplicationContext) : ReactContextBase
         }
     }
 
-    // ── creación ──────────────────────
+    // ── creación ──────────────────────────────────────────
 
     /**
      * EC P-256, PURPOSE_SIGN, no exportable. Se intenta primero en StrongBox
@@ -273,7 +274,7 @@ class SigningModule(private val ctx: ReactApplicationContext) : ReactContextBase
         }
     }
 
-    // ── diagnóstico ──────────────────────────────
+    // ── diagnóstico ───────────────────────────────
 
     /**
      * El AndroidKeyStore envuelve casi todos sus fallos en excepciones
@@ -323,7 +324,94 @@ class SigningModule(private val ctx: ReactApplicationContext) : ReactContextBase
         }
     }
 
-    // ── firma ────────────────────────
+    /**
+     * Prueba, contra este mismo chip, qué combinaciones de OAEP funcionan de
+     * verdad.
+     *
+     * El keymaster devuelve KM_ERROR_UNKNOWN_ERROR para cualquier fallo
+     * interno, así que desde fuera no hay forma de distinguir "este digest no
+     * me lo soporta el TEE" de "la autenticación no se aplicó bien". Esto lo
+     * separa: genera una clave temporal con los MISMOS parámetros pero SIN
+     * autenticación de usuario, y cifra y descifra contra ella con cada
+     * variante.
+     *
+     * Así la lectura es directa:
+     *   - si fallan las variantes con SHA-256, es que el TEE no las soporta
+     *     aunque acepte declararlas al generar la clave;
+     *   - si funcionan todas, el problema no es OAEP sino la autenticación
+     *     por operación de la clave real.
+     *
+     * La clave temporal se borra al terminar. Es diagnóstico, no camino de
+     * producción: no cifra nada real ni toca las claves de la identidad.
+     */
+    private fun diagnosticarOaep() {
+        try {
+            val ks = keystore()
+            if (ks.containsAlias(ALIAS_DIAG)) ks.deleteEntry(ALIAS_DIAG)
+
+            KeyPairGenerator.getInstance(KeyProperties.KEY_ALGORITHM_RSA, ANDROID_KEYSTORE)
+                .apply {
+                    initialize(
+                        KeyGenParameterSpec.Builder(ALIAS_DIAG, KeyProperties.PURPOSE_DECRYPT)
+                            .setKeySize(2048)
+                            .setDigests(KeyProperties.DIGEST_SHA256, KeyProperties.DIGEST_SHA1)
+                            .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_RSA_OAEP)
+                            .build(),
+                    )
+                }
+                .generateKeyPair()
+
+            val ks2 = keystore()
+            val privada = (ks2.getEntry(ALIAS_DIAG, null) as KeyStore.PrivateKeyEntry).privateKey
+            // La pública se reconstruye por KeyFactory para que el cifrado lo
+            // haga el proveedor de software y no el Keystore: así lo único que
+            // se está midiendo es el descifrado dentro del chip.
+            val publica = KeyFactory.getInstance("RSA").generatePublic(
+                X509EncodedKeySpec(ks2.getCertificate(ALIAS_DIAG).publicKey.encoded),
+            )
+            val dato = ByteArray(32).also { SecureRandom().nextBytes(it) }
+
+            fun probar(nombre: String, transformacion: String, spec: OAEPParameterSpec?) {
+                try {
+                    val cifrador = Cipher.getInstance(transformacion).apply {
+                        if (spec != null) init(Cipher.ENCRYPT_MODE, publica, spec)
+                        else init(Cipher.ENCRYPT_MODE, publica)
+                    }
+                    val ct = cifrador.doFinal(dato)
+                    val descifrador = Cipher.getInstance(transformacion).apply {
+                        if (spec != null) init(Cipher.DECRYPT_MODE, privada, spec)
+                        else init(Cipher.DECRYPT_MODE, privada)
+                    }
+                    val claro = descifrador.doFinal(ct)
+                    Log.i(
+                        "SelloSigning",
+                        "diag $nombre: ${if (claro.contentEquals(dato)) "FUNCIONA" else "descifra pero no coincide"}",
+                    )
+                } catch (e: Exception) {
+                    Log.w("SelloSigning", "diag $nombre: ${causaDe(e)}")
+                }
+            }
+
+            val d = PSource.PSpecified.DEFAULT
+            Log.i("SelloSigning", "diag ── clave temporal SIN autenticación ──")
+            probar("OAEP-SHA256 / MGF1-SHA1 (spec)", "RSA/ECB/OAEPPadding",
+                OAEPParameterSpec("SHA-256", "MGF1", MGF1ParameterSpec.SHA1, d))
+            probar("OAEP-SHA256 / MGF1-SHA256 (spec)", "RSA/ECB/OAEPPadding",
+                OAEPParameterSpec("SHA-256", "MGF1", MGF1ParameterSpec.SHA256, d))
+            probar("OAEP-SHA1 / MGF1-SHA1 (spec)", "RSA/ECB/OAEPPadding",
+                OAEPParameterSpec("SHA-1", "MGF1", MGF1ParameterSpec.SHA1, d))
+            probar("OAEPWithSHA-256AndMGF1Padding (sin spec)",
+                "RSA/ECB/OAEPWithSHA-256AndMGF1Padding", null)
+            probar("OAEPWithSHA-1AndMGF1Padding (sin spec)",
+                "RSA/ECB/OAEPWithSHA-1AndMGF1Padding", null)
+
+            ks2.deleteEntry(ALIAS_DIAG)
+        } catch (e: Exception) {
+            Log.w("SelloSigning", "no se pudo diagnosticar: ${causaDe(e)}")
+        }
+    }
+
+    // ── firma ─────────────────────────────────
 
     /**
      * El reto llega en base64 y se firma dentro del chip. El texto del prompt
@@ -404,7 +492,7 @@ class SigningModule(private val ctx: ReactApplicationContext) : ReactContextBase
         }
     }
 
-    // ── descifrado ────────────────────────────
+    // ── descifrado ────────────────────────────────
 
     /**
      * §10 — abre un sobre cifrado híbrido, todo dentro del módulo nativo.
@@ -516,6 +604,9 @@ class SigningModule(private val ctx: ReactApplicationContext) : ReactContextBase
                             // Un fallo aquí suele ser padding: el emisor cifró con
                             // otros parámetros OAEP que los que espera esta clave.
                             promesa.reject("E_DESCIFRADO", fallo("abrirSobre", e), e)
+                            // En un hilo aparte: genera una clave y hace cinco
+                            // operaciones, demasiado para el hilo principal.
+                            Thread { diagnosticarOaep() }.start()
                         } finally {
                             // La clave AES no tiene por qué seguir en memoria.
                             claveAes?.fill(0)
@@ -546,7 +637,7 @@ class SigningModule(private val ctx: ReactApplicationContext) : ReactContextBase
         }
     }
 
-    // ── cifrado ────────────────────────
+    // ── cifrado ───────────────────────────────
 
     /**
      * §14 — cierra un sobre cifrado para el dominio. El inverso de abrirSobre().
@@ -640,7 +731,7 @@ class SigningModule(private val ctx: ReactApplicationContext) : ReactContextBase
         }
     }
 
-    // ── borrado ────────────────────────
+    // ── borrado ───────────────────────────────
 
     @ReactMethod
     fun borrarIdentidad(promesa: Promise) {
