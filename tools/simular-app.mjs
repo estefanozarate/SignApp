@@ -24,7 +24,7 @@ const DOMINIO = process.env.DOMINIO ?? 'http://127.0.0.1:8787';
 // Tiene que coincidir con el del servidor: MGF1=sha256 en los dos, o en ninguno.
 const MGF1_APP = process.env.MGF1 === 'sha256' ? 'sha256' : 'sha1';
 
-// ── identidad simulada de la app (§3.1) ───────────────────────────────────
+// ── identidad simulada de la app (§3.1) ────────────────────────────────
 // Dos claves, igual que en el chip: EC para firmar, RSA para recibir.
 const firma = generateKeyPairSync('ec', { namedCurve: 'prime256v1' });
 const cifrado = generateKeyPairSync('rsa', { modulusLength: 2048 });
@@ -98,7 +98,7 @@ function comprobar(nombre, condicion, detalle = '') {
   if (!condicion) fallos++;
 }
 
-// ── §10 emparejar y recibir el secreto ────────────────────────────────────
+// ── §10 emparejar y recibir el secreto ──────────────────────────────
 async function emparejar() {
   const c = await pedir('PAIR');
   const p = await verificar(c.qr);
@@ -131,7 +131,7 @@ async function abrirSobre(sobre) {
   ]).toString('utf8');
 }
 
-// ── §14 devolver el secreto firmado y cifrado ─────────────────────────────
+// ── §14 devolver el secreto firmado y cifrado ────────────────────────
 async function devolver(secreto, { estropear } = {}) {
   const c = await pedir('SECRET_REQUEST');
   const p = await verificar(c.qr);
@@ -171,7 +171,7 @@ console.log(`        secreto ${huella(secreto)}…\n`);
   comprobar('y el secreto coincide con el que entregó', cuerpo.matches === true);
 }
 
-// ── §24 lo que debe rechazar ──────────────────────────────────────────────
+// ── §24 lo que debe rechazar ──────────────────────────────────────
 console.log('\nCasos que deben fallar:');
 {
   const { codigo } = await devolver('secreto-inventado');
@@ -204,6 +204,94 @@ console.log('\nCasos que deben fallar:');
   await verificar(c.qr);
   const { codigo } = await json(await fetch(`${DOMINIO}/verificar/${c.request_id}`));
   comprobar('5/24 · una petición ya consumida no se verifica dos veces', codigo === 409, `HTTP ${codigo}`);
+}
+{
+  // 3/24 — request_id que no existe.
+  const { codigo } = await json(await fetch(`${DOMINIO}/verificar/${'0'.repeat(32)}`));
+  comprobar('3/24 · request_id inexistente se rechaza', codigo === 404, `HTTP ${codigo}`);
+}
+{
+  // 4/24 — petición caducada. ttl=1 y se espera a que pase.
+  const { cuerpo } = await json(await fetch(`${DOMINIO}/peticion`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ purpose: 'PAIR', ttl: 1 }),
+  }));
+  // expires_at trunca a segundos; hace falta más de un segundo entero de
+  // margen para que "ahora > expires_at" sea cierto sin ambigüedad.
+  await new Promise((r) => setTimeout(r, 2200));
+  const { codigo } = await json(await fetch(`${DOMINIO}/verificar/${cuerpo.request_id}`));
+  comprobar('4/24 · petición caducada se rechaza', codigo === 410, `HTTP ${codigo}`);
+}
+{
+  // 6/24 — nonce que no coincide con el de la petición, en la respuesta.
+  const c = await pedir('SECRET_REQUEST');
+  const p = await verificar(c.qr);
+  const { codigo, cuerpo } = await json(await fetch(`${DOMINIO}/respuesta/${p.request_id}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      type: 'APP_IDENTITY', version: 1, request_id: p.request_id,
+      nonce: 'otro-nonce-que-no-es-el-de-la-peticion',
+      app_id: APP_ID, app_public_key: spki(firma.publicKey),
+      app_encryption_key: spki(cifrado.publicKey),
+      proof_of_possession: pruebaDePosesion(p, 'SECRET_REQUEST'),
+    }),
+  }));
+  comprobar('6/24 · nonce que no cuadra en la respuesta se rechaza',
+    codigo === 400, `HTTP ${codigo} ${cuerpo.error ?? ''}`);
+}
+{
+  // §16 — el sobre firmado va dirigido a un domain_id que no es el de este
+  // dominio: se rechaza antes incluso de mirar quién firma.
+  const c = await pedir('SECRET_REQUEST');
+  const p = await verificar(c.qr);
+  const r = {
+    version: 1, request_id: p.request_id, nonce: p.nonce,
+    domain_id: 'domain-id-equivocado', app_id: APP_ID, secret: secreto,
+  };
+  const signature = firmar(canonico(r, p.domain));
+  const sobre = cerrarSobre(p.domain_public_key, JSON.stringify({ ...r, signature }));
+  const { codigo, cuerpo } = await responder(p, { type: 'SECRET_RESPONSE', version: 1, envelope: sobre });
+  comprobar('§16 · respuesta dirigida a otro domain_id se rechaza',
+    codigo === 400, `HTTP ${codigo} ${cuerpo.error ?? ''}`);
+}
+{
+  // §19 "unknown App identity" — firma válida, pero de un app_id que nunca
+  // se emparejó, así que el dominio no tiene con qué clave verificarla.
+  const otraFirma = generateKeyPairSync('ec', { namedCurve: 'prime256v1' });
+  const otroAppId = randomBytes(16).toString('hex');
+  const c = await pedir('SECRET_REQUEST');
+  const p = await verificar(c.qr);
+  const r = { version: 1, request_id: p.request_id, nonce: p.nonce, domain_id: p.domain_id, app_id: otroAppId, secret: secreto };
+  const signature = createSign('SHA256').update(Buffer.from(canonico(r, p.domain), 'utf8'))
+    .sign(otraFirma.privateKey).toString('base64');
+  const sobre = cerrarSobre(p.domain_public_key, JSON.stringify({ ...r, signature }));
+  const { codigo, cuerpo } = await responder(p, { type: 'SECRET_RESPONSE', version: 1, envelope: sobre });
+  comprobar('§19 · app_id nunca emparejado se rechaza',
+    codigo === 403, `HTTP ${codigo} ${cuerpo.error ?? ''}`);
+}
+{
+  // Una petición no se responde dos veces, aunque la segunda sea válida.
+  const c = await pedir('SECRET_REQUEST');
+  const p = await verificar(c.qr);
+  const r = { version: 1, request_id: p.request_id, nonce: p.nonce, domain_id: p.domain_id, app_id: APP_ID, secret: secreto };
+  const cuerpoResp = { type: 'SECRET_RESPONSE', version: 1, envelope: cerrarSobre(p.domain_public_key, JSON.stringify({ ...r, signature: firmar(canonico(r, p.domain)) })) };
+  const primera = await responder(p, cuerpoResp);
+  const segunda = await responder(p, cuerpoResp);
+  comprobar('§15 · una petición no se responde dos veces',
+    primera.codigo === 200 && segunda.codigo === 409, `HTTP ${primera.codigo} luego ${segunda.codigo}`);
+}
+{
+  // §22 "Concurrent consumption" — dos verificaciones a la vez sobre la
+  // misma petición: solo una debe ganar.
+  const c = await pedir('SECRET_REQUEST');
+  const [a, b] = await Promise.all([
+    json(await fetch(`${DOMINIO}/verificar/${c.request_id}`)),
+    json(await fetch(`${DOMINIO}/verificar/${c.request_id}`)),
+  ]);
+  const codigos = [a.codigo, b.codigo].sort();
+  comprobar('§22 · verificación concurrente: solo una gana', codigos[0] === 200 && codigos[1] === 409,
+    `HTTP ${a.codigo} y ${b.codigo}`);
 }
 
 console.log(fallos === 0 ? '\nTodo en orden.' : `\n${fallos} comprobación(es) fallaron.`);

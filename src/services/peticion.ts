@@ -1,7 +1,7 @@
 import { Signing } from '../native/Signing';
 import type { SecretoGuardado } from './boveda';
 import { bytesAB64, textoABytes } from '../lib/aleatorio';
-import { retoLegible, textoDeB64 } from '../lib/b64';
+import { textoDeB64 } from '../lib/b64';
 
 /**
  * Petición de un dominio, verificada contra el propio dominio por HTTPS.
