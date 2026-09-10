@@ -1,16 +1,22 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-  Sin texto claro en ningún caso: todo el signaling y la API van por TLS.
+  Sin texto claro en ningún caso: todo va por HTTPS, salvo el propio
+  loopback, y es deliberado — ahí no hay red que espiar. Sirve para el
+  dominio de referencia durante el desarrollo (server/servidor.mjs), al que
+  el teléfono llega por `adb reverse`; es la misma regla que aplica
+  baseDe() en src/services/peticion.ts, que solo tolera http:// contra
+  127.0.0.1/localhost — conviene que las dos capas digan lo mismo.
 
-  La única excepción es 127.0.0.1, y es deliberada: ahí no hay red que
-  espiar. Sirve para el relay local durante el desarrollo, al que el
-  teléfono llega por `adb reverse`. Es la misma regla que aplica
-  CoseModule al claim "sgu" del QR, que solo acepta wss:// o
-  ws://127.0.0.1 — conviene que las dos capas digan lo mismo.
+  Van los dos nombres del loopback: 127.0.0.1 (servidor.mjs, y lo que
+  espera el resto de la app) y localhost (a donde apunta por defecto el
+  dev support manager de React Native en debug al buscar Metro en
+  localhost:8081 — son la misma IP, pero el network security config los
+  trata como dominios distintos).
 -->
 <network-security-config>
     <base-config cleartextTrafficPermitted="false" />
     <domain-config cleartextTrafficPermitted="true">
         <domain includeSubdomains="false">127.0.0.1</domain>
+        <domain includeSubdomains="false">localhost</domain>
     </domain-config>
 </network-security-config>
