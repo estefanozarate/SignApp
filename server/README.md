@@ -29,6 +29,23 @@ La clave del dominio se genera en el primer arranque y se guarda en
 `server/datos/dominio.pem` (0600); no se sube al repo. El `domain_id` se
 deriva de ella, así que si cambia hay que volver a emparejar todas las apps.
 
+## Persistencia
+
+Las apps emparejadas (§9) y los secretos que el dominio les entregó (§10)
+viven en `server/datos/sello.db`, con `node:sqlite` — incluido en Node desde
+la 22.5, sin agregar ninguna dependencia externa. Sobreviven a un reinicio
+del proceso; antes vivían en un `Map()` en memoria y se perdían cada vez.
+
+`node:sqlite` todavía es EXPERIMENTAL en Node 22: al arrancar imprime un
+`ExperimentalWarning` una sola vez — es inofensivo, no afecta el
+funcionamiento. Las peticiones pendientes (`/peticion`, antes de que la app
+las verifique) siguen en memoria a propósito: son de vida corta por diseño
+(minutos), no vale la pena persistirlas.
+
+```
+DB        ruta de la base de datos (server/datos/sello.db)
+```
+
 ## Que el teléfono llegue hasta aquí
 
 El teléfono no puede usar `localhost`/`127.0.0.1` para hablar con tu
