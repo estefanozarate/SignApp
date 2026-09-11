@@ -433,6 +433,56 @@ class SigningModule(private val ctx: ReactApplicationContext) : ReactContextBase
     }
 
     /**
+     * Aísla si el fallo de abrirSobre() está en la clave `sello.cifrado.v1`
+     * en sí, o en un desajuste entre lo que el servidor cifró y lo que la
+     * app tiene guardado. diagnosticarOaep() prueba con una clave TEMPORAL
+     * — que siempre resultó funcionar — así que nunca había comprobado la
+     * clave REAL contra un cifrado que no viniera del propio servidor.
+     *
+     * Reconstruye la pública desde el certificado de la propia clave real
+     * (igual que hace describir() para exportarla), cifra un dato de
+     * control CON ESA pública por software (sin tocar el Keystore) y
+     * descifra con la privada real. Si esto funciona, la clave está bien y
+     * el problema está en lo que llega del servidor (una pública distinta a
+     * la que la app cree tener, un byte perdido en el transporte). Si esto
+     * TAMBIÉN falla, el problema es la clave real en sí — algo la
+     * distingue de las temporales de diagnosticarOaep(), y ahí seguiría la
+     * investigación.
+     */
+    private fun autoconsistenciaCifrado() {
+        try {
+            val ks = keystore()
+            val entrada = ks.getEntry(ALIAS_CIFRADO, null) as? KeyStore.PrivateKeyEntry ?: return
+            val publicaReal = KeyFactory.getInstance("RSA").generatePublic(
+                X509EncodedKeySpec(ks.getCertificate(ALIAS_CIFRADO).publicKey.encoded),
+            )
+            val dato = ByteArray(32).also { SecureRandom().nextBytes(it) }
+            val spec = OAEPParameterSpec("SHA-256", "MGF1", MGF1ParameterSpec.SHA1, PSource.PSpecified.DEFAULT)
+
+            val cifrador = Cipher.getInstance("RSA/ECB/OAEPPadding")
+                .apply { init(Cipher.ENCRYPT_MODE, publicaReal, spec) }
+            val ct = cifrador.doFinal(dato)
+
+            val descifrador = Cipher.getInstance("RSA/ECB/OAEPPadding")
+                .apply { init(Cipher.DECRYPT_MODE, entrada.privateKey, spec) }
+            val claro = descifrador.doFinal(ct)
+
+            Log.i(
+                "SelloSigning",
+                "diag autoconsistencia sello.cifrado.v1 (cifrado local, clave real): " +
+                    if (claro.contentEquals(dato)) "FUNCIONA — el problema está en lo que llegó del servidor"
+                    else "descifra pero no coincide",
+            )
+        } catch (e: Exception) {
+            Log.w(
+                "SelloSigning",
+                "diag autoconsistencia sello.cifrado.v1: FALLA incluso con cifrado propio — " +
+                    "${causaDe(e)}",
+            )
+        }
+    }
+
+    /**
      * Prueba, contra este mismo chip, qué combinaciones de OAEP funcionan de
      * verdad — y, desde el segundo hallazgo de generarCifrado(), si StrongBox
      * es también parte del problema.
@@ -935,7 +985,10 @@ class SigningModule(private val ctx: ReactApplicationContext) : ReactContextBase
             // rompe esta combinación de parámetros, el diagnóstico de siempre
             // sigue disponible.
             promesa.reject("E_DESCIFRADO", fallo("abrirSobre", e), e)
-            Thread { diagnosticarOaep() }.start()
+            Thread {
+                autoconsistenciaCifrado()
+                diagnosticarOaep()
+            }.start()
         } finally {
             // La clave AES no tiene por qué seguir en memoria.
             claveAes?.fill(0)
