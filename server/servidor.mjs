@@ -29,6 +29,7 @@ import {
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { DatabaseSync } from 'node:sqlite';
 
 const PUERTO = Number(process.env.PORT ?? 8787);
 const HOST = process.env.HOST ?? '127.0.0.1';
@@ -151,29 +152,61 @@ const domainSpki = createPublicKey(domainPriv).export({ type: 'spki', format: 'd
 const DOMAIN_ID = createHash('sha256').update(domainSpki).digest('hex').slice(0, 32);
 const DOMAIN = process.env.DOMINIO ?? `${HOST}:${PUERTO}`;
 
-/** request_id → petición */
+/** request_id → petición. Vida corta por diseño (minutos): no hace falta persistirlas. */
 const peticiones = new Map();
 
 /**
- * app_id → identidad registrada (§9).
+ * apps (§9) y secretos (§10), en SQLite — sobreviven a un reinicio del
+ * proceso. Antes vivían en dos Map() en memoria, con esta nota: "en
+ * producción esto va a una base de datos". node:sqlite viene incluido en
+ * Node desde la 22.5 (todavía EXPERIMENTAL — imprime un aviso al arrancar,
+ * inofensivo), así que no hace falta agregar una dependencia externa para
+ * cumplirla.
  *
- * En producción esto va a una base de datos. Aquí en memoria, así que al
- * reiniciar hay que volver a emparejar aunque la clave del dominio persista.
+ * apps: app_id → identidad registrada. secretos: app_id → el secreto que
+ * el dominio entregó al emparejar; se conserva porque es contra esta copia
+ * que el §14 comprueba que lo que la app devuelve es lo que él dio.
  */
-const apps = new Map();
+const RUTA_DB = process.env.DB ?? join(DIR, 'datos', 'sello.db');
+mkdirSync(dirname(RUTA_DB), { recursive: true });
+const db = new DatabaseSync(RUTA_DB);
+db.exec(`
+  CREATE TABLE IF NOT EXISTS apps (
+    app_id TEXT PRIMARY KEY,
+    app_public_key TEXT NOT NULL,
+    app_encryption_key TEXT NOT NULL,
+    registrada_en INTEGER NOT NULL
+  );
+  CREATE TABLE IF NOT EXISTS secretos (
+    app_id TEXT PRIMARY KEY,
+    secreto TEXT NOT NULL
+  );
+`);
+const sqlAppsSet = db.prepare(
+  `INSERT INTO apps (app_id, app_public_key, app_encryption_key, registrada_en)
+   VALUES (?, ?, ?, ?)
+   ON CONFLICT(app_id) DO UPDATE SET
+     app_public_key = excluded.app_public_key,
+     app_encryption_key = excluded.app_encryption_key,
+     registrada_en = excluded.registrada_en`,
+);
+const sqlAppsGet = db.prepare('SELECT * FROM apps WHERE app_id = ?');
+const sqlSecretosSet = db.prepare(
+  'INSERT INTO secretos (app_id, secreto) VALUES (?, ?) ' +
+  'ON CONFLICT(app_id) DO UPDATE SET secreto = excluded.secreto',
+);
+const sqlSecretosGet = db.prepare('SELECT secreto FROM secretos WHERE app_id = ?');
 
-/**
- * app_id → secreto que el dominio le entregó (§10).
- *
- * Se crea al emparejar y se entrega ahí mismo, cifrado para la app. El
- * dominio conserva su copia por un motivo concreto: es contra ella que
- * comprueba, en el §14, que lo que la app devuelve es lo que él dio.
- *
- * En un producto real esto vive en la base de datos del dominio. Aquí, en
- * memoria: al reiniciar el proceso hay que volver a emparejar, aunque la
- * clave del dominio persista.
- */
-const secretos = new Map();
+const apps = {
+  set: (appId, registro) => sqlAppsSet.run(
+    appId, registro.app_public_key, registro.app_encryption_key, registro.registrada_en,
+  ),
+  get: (appId) => sqlAppsGet.get(appId) ?? undefined,
+};
+const secretos = {
+  set: (appId, secreto) => sqlSecretosSet.run(appId, secreto),
+  get: (appId) => sqlSecretosGet.get(appId)?.secreto,
+};
 
 const idValido = (v) => typeof v === 'string' && /^[0-9a-f]{32}$/i.test(v);
 const ahora = () => Math.floor(Date.now() / 1000);
