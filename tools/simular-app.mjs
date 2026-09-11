@@ -16,15 +16,63 @@
  * que este script sirve para distinguir.
  */
 import {
-  generateKeyPairSync, createSign, createCipheriv, publicEncrypt,
-  randomBytes, constants, createHash,
+  generateKeyPairSync, createSign, createCipheriv, createDecipheriv, publicEncrypt, privateDecrypt,
+  randomBytes, constants, createHash, createPublicKey, timingSafeEqual,
 } from 'node:crypto';
 
 const DOMINIO = process.env.DOMINIO ?? 'http://127.0.0.1:8787';
 // Tiene que coincidir con el del servidor: MGF1=sha256 en los dos, o en ninguno.
 const MGF1_APP = process.env.MGF1 === 'sha256' ? 'sha256' : 'sha1';
 
-// ── identidad simulada de la app (§3.1) ────────────────────────────────
+/**
+ * MGF1 y el empaquetado/desempaquetado OAEP (RFC 8017), a mano — la misma
+ * razón que en server/servidor.mjs: node:crypto ignora en silencio la
+ * opción mgf1Hash de publicEncrypt()/privateDecrypt(), así que la única
+ * forma de que este script reproduzca de verdad lo que hace Kotlin
+ * (MGF1-SHA1 aunque OAEP use SHA-256) es armar el bloque EM sin pasar por
+ * ese parámetro.
+ */
+function mgf1(seed, len, hashName) {
+  const bloques = [];
+  let total = 0;
+  let contador = 0;
+  while (total < len) {
+    const c = Buffer.alloc(4);
+    c.writeUInt32BE(contador, 0);
+    const bloque = createHash(hashName).update(Buffer.concat([seed, c])).digest();
+    bloques.push(bloque);
+    total += bloque.length;
+    contador++;
+  }
+  return Buffer.concat(bloques).subarray(0, len);
+}
+const xor = (a, b) => Buffer.from(a.map((byte, i) => byte ^ b[i]));
+function oaepEmpaquetar(mensaje, tamK, hashPrincipal, hashMgf1) {
+  const hLen = createHash(hashPrincipal).digest().length;
+  const lHash = createHash(hashPrincipal).update(Buffer.alloc(0)).digest();
+  const db = Buffer.concat([
+    lHash, Buffer.alloc(tamK - mensaje.length - 2 * hLen - 2, 0), Buffer.from([0x01]), mensaje,
+  ]);
+  const seed = randomBytes(hLen);
+  const dbEnmascarado = xor(db, mgf1(seed, db.length, hashMgf1));
+  const seedEnmascarada = xor(seed, mgf1(dbEnmascarado, hLen, hashMgf1));
+  return Buffer.concat([Buffer.from([0x00]), seedEnmascarada, dbEnmascarado]);
+}
+function oaepDesempaquetar(em, hashPrincipal, hashMgf1) {
+  const hLen = createHash(hashPrincipal).digest().length;
+  const seedEnmascarada = em.subarray(1, 1 + hLen);
+  const dbEnmascarado = em.subarray(1 + hLen);
+  const seed = xor(seedEnmascarada, mgf1(dbEnmascarado, hLen, hashMgf1));
+  const db = xor(dbEnmascarado, mgf1(seed, dbEnmascarado.length, hashMgf1));
+  const lHash = createHash(hashPrincipal).update(Buffer.alloc(0)).digest();
+  if (!timingSafeEqual(lHash, db.subarray(0, hLen))) throw new Error('OAEP: lHash no coincide');
+  let i = hLen;
+  while (i < db.length && db[i] === 0) i++;
+  if (db[i] !== 0x01) throw new Error('OAEP: separador inválido');
+  return db.subarray(i + 1);
+}
+
+// ── identidad simulada de la app (§3.1) ───────────────────────────────────
 // Dos claves, igual que en el chip: EC para firmar, RSA para recibir.
 const firma = generateKeyPairSync('ec', { namedCurve: 'prime256v1' });
 const cifrado = generateKeyPairSync('rsa', { modulusLength: 2048 });
@@ -70,16 +118,14 @@ function cerrarSobre(spkiB64, claro) {
   const iv = randomBytes(12);
   const c = createCipheriv('aes-256-gcm', clave, iv);
   const ct = Buffer.concat([c.update(Buffer.from(claro, 'utf8')), c.final()]);
+
+  const publica = createPublicKey({ key: Buffer.from(spkiB64, 'base64'), format: 'der', type: 'spki' });
+  const tamK = publica.asymmetricKeyDetails.modulusLength / 8;
+  const em = oaepEmpaquetar(clave, tamK, 'sha256', 'sha1');
+
   return {
     alg: 'RSA-OAEP-256-MGF1SHA1+A256GCM',
-    encrypted_key: publicEncrypt({
-      key: Buffer.from(spkiB64, 'base64'),
-      format: 'der',
-      type: 'spki',
-      padding: constants.RSA_PKCS1_OAEP_PADDING,
-      oaepHash: 'sha256',
-      mgf1Hash: 'sha1',
-    }, clave).toString('base64'),
+    encrypted_key: publicEncrypt({ key: publica, padding: constants.RSA_NO_PADDING }, em).toString('base64'),
     iv: iv.toString('base64'),
     ciphertext: ct.toString('base64'),
     tag: c.getAuthTag().toString('base64'),
@@ -98,7 +144,7 @@ function comprobar(nombre, condicion, detalle = '') {
   if (!condicion) fallos++;
 }
 
-// ── §10 emparejar y recibir el secreto ──────────────────────────────
+// ── §10 emparejar y recibir el secreto ────────────────────────────────────
 async function emparejar() {
   const c = await pedir('PAIR');
   const p = await verificar(c.qr);
@@ -117,13 +163,12 @@ async function emparejar() {
 
 /** Lo que hace abrirSobre() en el chip. */
 async function abrirSobre(sobre) {
-  const { privateDecrypt, createDecipheriv } = await import('node:crypto');
-  const clave = privateDecrypt({
-    key: cifrado.privateKey,
-    padding: constants.RSA_PKCS1_OAEP_PADDING,
-    oaepHash: 'sha256',
-    mgf1Hash: MGF1_APP,
-  }, Buffer.from(sobre.encrypted_key, 'base64'));
+  const tamK = cifrado.privateKey.asymmetricKeyDetails.modulusLength / 8;
+  const em = privateDecrypt(
+    { key: cifrado.privateKey, padding: constants.RSA_NO_PADDING },
+    Buffer.from(sobre.encrypted_key, 'base64'),
+  );
+  const clave = oaepDesempaquetar(em, 'sha256', MGF1_APP);
   const d = createDecipheriv('aes-256-gcm', clave, Buffer.from(sobre.iv, 'base64'));
   d.setAuthTag(Buffer.from(sobre.tag, 'base64'));
   return Buffer.concat([
@@ -131,7 +176,7 @@ async function abrirSobre(sobre) {
   ]).toString('utf8');
 }
 
-// ── §14 devolver el secreto firmado y cifrado ────────────────────────
+// ── §14 devolver el secreto firmado y cifrado ─────────────────────────────
 async function devolver(secreto, { estropear } = {}) {
   const c = await pedir('SECRET_REQUEST');
   const p = await verificar(c.qr);
@@ -171,7 +216,7 @@ console.log(`        secreto ${huella(secreto)}…\n`);
   comprobar('y el secreto coincide con el que entregó', cuerpo.matches === true);
 }
 
-// ── §24 lo que debe rechazar ──────────────────────────────────────
+// ── §24 lo que debe rechazar ──────────────────────────────────────────────
 console.log('\nCasos que deben fallar:');
 {
   const { codigo } = await devolver('secreto-inventado');
