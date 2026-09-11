@@ -42,20 +42,88 @@ const PROPOSITOS = new Set(['PAIR', 'SECRET_REQUEST']);
 /**
  * Qué digest usa MGF1 al envolver la clave AES para la app.
  *
- * Debería ser un detalle cerrado, y no lo es. El framework de Android solo
- * acepta MGF1ParameterSpec.SHA1 en el spec del Cipher — rechaza SHA-256 con
- * "Unsupported MGF1 digest". Pero varios keymaster ignoran ese parámetro y
- * aplican MGF1 con el MISMO digest que OAEP, o sea SHA-256. En esos equipos
- * el emisor tiene que envolver con SHA-256 aunque la app pida SHA-1; si no,
- * el chip falla al deshacer el padding con un "Unknown error" que no dice
- * nada, porque el keymaster no tiene código para "el padding no cuadra".
+ * SIEMPRE sha1: es lo único que el Keystore de Android admite para MGF1
+ * (rechaza SHA-256 con "Unsupported MGF1 digest"), así que esto ya no hace
+ * falta conmutarlo — queda la variable por si algún día hiciera falta
+ * volver a diagnosticar otro chip.
  *
- * Por eso es conmutable: es la única forma de averiguar qué hace un TEE
- * concreto sin recompilar la app.
+ * IMPORTANTE — esto NO se cifra con publicEncrypt() de node:crypto: ver
+ * oaepEmpaquetar() más abajo para el porqué.
  *
  *   MGF1=sha256 npm start
  */
 const MGF1_APP = process.env.MGF1 === 'sha256' ? 'sha256' : 'sha1';
+
+/**
+ * MGF1 (RFC 8017, Apéndice B.2.1) y el empaquetado/desempaquetado OAEP
+ * (RFC 8017 §7.1), implementados a mano.
+ *
+ * node:crypto ignora en silencio la opción mgf1Hash de publicEncrypt() y
+ * privateDecrypt(): MGF1 termina siempre con el MISMO digest que oaepHash,
+ * pase lo que se le pida. Comprobado en Node 22.22.2 deshaciendo el padding
+ * a mano — no avisa, no lanza, simplemente cifra y descifra con el hash
+ * equivocado. Así estuvo escondido durante toda la Fase 4: tools/simular-app.mjs
+ * hablaba con este mismo servidor usando la misma API rota en los dos lados,
+ * así que ambos coincidían entre sí (los dos en MGF1-SHA256) aunque ninguno
+ * hiciera lo que el código decía. Recién se notó con la app real, que sí
+ * arma el OAEP correctamente porque Kotlin usa OAEPParameterSpec sobre el
+ * proveedor de software (Conscrypt), no sobre node:crypto.
+ *
+ * Como Android además exige un MGF1 concreto y distinto del hash principal
+ * (SHA-1, aunque OAEP use SHA-256), la única forma de producir o abrir un
+ * sobre que de verdad interopere con el chip es armar el bloque EM a mano y
+ * cifrarlo/descifrarlo con RSA_NO_PADDING — sin pasar por el parámetro roto.
+ */
+function mgf1(seed, len, hashName) {
+  const bloques = [];
+  let total = 0;
+  let contador = 0;
+  while (total < len) {
+    const c = Buffer.alloc(4);
+    c.writeUInt32BE(contador, 0);
+    const bloque = createHash(hashName).update(Buffer.concat([seed, c])).digest();
+    bloques.push(bloque);
+    total += bloque.length;
+    contador++;
+  }
+  return Buffer.concat(bloques).subarray(0, len);
+}
+
+function xor(a, b) {
+  const salida = Buffer.alloc(a.length);
+  for (let i = 0; i < a.length; i++) salida[i] = a[i] ^ b[i];
+  return salida;
+}
+
+function oaepEmpaquetar(mensaje, tamK, hashPrincipal, hashMgf1) {
+  const hLen = createHash(hashPrincipal).digest().length;
+  const lHash = createHash(hashPrincipal).update(Buffer.alloc(0)).digest();
+  const psLen = tamK - mensaje.length - 2 * hLen - 2;
+  if (psLen < 0) throw new Error('mensaje demasiado largo para OAEP con este módulo');
+  const db = Buffer.concat([lHash, Buffer.alloc(psLen, 0), Buffer.from([0x01]), mensaje]);
+  const seed = randomBytes(hLen);
+  const dbEnmascarado = xor(db, mgf1(seed, db.length, hashMgf1));
+  const seedEnmascarada = xor(seed, mgf1(dbEnmascarado, hLen, hashMgf1));
+  return Buffer.concat([Buffer.from([0x00]), seedEnmascarada, dbEnmascarado]);
+}
+
+function oaepDesempaquetar(em, hashPrincipal, hashMgf1) {
+  const hLen = createHash(hashPrincipal).digest().length;
+  const seedEnmascarada = em.subarray(1, 1 + hLen);
+  const dbEnmascarado = em.subarray(1 + hLen);
+  const seed = xor(seedEnmascarada, mgf1(dbEnmascarado, hLen, hashMgf1));
+  const db = xor(dbEnmascarado, mgf1(seed, dbEnmascarado.length, hashMgf1));
+  const lHash = createHash(hashPrincipal).update(Buffer.alloc(0)).digest();
+  if (!timingSafeEqual(lHash, db.subarray(0, hLen))) {
+    throw new Error('OAEP: no descifra con estos parámetros (lHash no coincide)');
+  }
+  let i = hLen;
+  while (i < db.length && db[i] === 0) i++;
+  if (db[i] !== 0x01) {
+    throw new Error('OAEP: no descifra con estos parámetros (separador inválido)');
+  }
+  return db.subarray(i + 1);
+}
 
 // ── §3.2 identidad del dominio, persistida ──────────────────────────
 
@@ -164,25 +232,23 @@ function cifrarParaLaApp(secreto, spkiB64) {
   const claveApp = createPublicKey({
     key: Buffer.from(spkiB64, 'base64'), format: 'der', type: 'spki',
   });
+  const tamK = claveApp.asymmetricKeyDetails.modulusLength / 8;
 
   const claveAes = randomBytes(32);
   const iv = randomBytes(12);
   const c = createCipheriv('aes-256-gcm', claveAes, iv);
   const ct = Buffer.concat([c.update(Buffer.from(secreto, 'utf8')), c.final()]);
 
+  // Ver oaepEmpaquetar() más arriba: aquí NO se usa publicEncrypt() con
+  // padding OAEP directo, porque su opción mgf1Hash no se respeta.
+  const em = oaepEmpaquetar(claveAes, tamK, 'sha256', MGF1_APP);
+  const claveEnvuelta = publicEncrypt({ key: claveApp, padding: constants.RSA_NO_PADDING }, em);
+
   return {
     // El nombre dice la combinación exacta, para que un cliente futuro
     // no tenga que adivinar los parámetros.
     alg: `RSA-OAEP-256-MGF1${MGF1_APP.toUpperCase()}+A256GCM`,
-    encrypted_key: publicEncrypt(
-      {
-        key: claveApp,
-        padding: constants.RSA_PKCS1_OAEP_PADDING,
-        oaepHash: 'sha256',
-        mgf1Hash: MGF1_APP,
-      },
-      claveAes,
-    ).toString('base64'),
+    encrypted_key: claveEnvuelta.toString('base64'),
     iv: iv.toString('base64'),
     ciphertext: ct.toString('base64'),
     tag: c.getAuthTag().toString('base64'),
@@ -194,27 +260,27 @@ function cifrarParaLaApp(secreto, spkiB64) {
 /**
  * Abre el sobre que la app cifró para este dominio. El inverso exacto de
  * cerrarSobre() en Kotlin, con los mismos parámetros OAEP: SHA-256 para el
- * hash y SHA-1 para MGF1. Si no coincidieran, esto fallaría con un error de
- * padding que no dice nada de la causa.
+ * hash y SHA-1 para MGF1.
  *
- * Aquí MGF1 sí es SHA-1 fijo, y no sigue a MGF1_APP: este sobre lo cierra
- * Conscrypt con una clave pública normal, no el Keystore, y ese proveedor sí
- * respeta el parámetro que se le pasa.
+ * Aquí MGF1 es SHA-1 fijo, y no sigue a MGF1_APP: este sobre lo cierra
+ * Kotlin con una clave pública normal reconstruida por software (Conscrypt),
+ * no con el Keystore, así que del lado de la app el parámetro sí se respeta
+ * tal cual. Ver oaepEmpaquetar() más arriba para el porqué de que este lado
+ * tampoco use privateDecrypt() con padding OAEP directo: su mgf1Hash
+ * tampoco se respeta, y en sentido inverso el fallo sería exactamente el
+ * mismo que en cifrarParaLaApp().
  *
  * Lanza si algo no cuadra — y que lance es la respuesta correcta: GCM
  * autentica, así que un fallo aquí significa que el dato llegó alterado o que
  * no iba dirigido a este dominio. En ningún caso hay algo que aprovechar.
  */
 function abrirDeLaApp(sobre) {
-  const claveAes = privateDecrypt(
-    {
-      key: domainPriv,
-      padding: constants.RSA_PKCS1_OAEP_PADDING,
-      oaepHash: 'sha256',
-      mgf1Hash: 'sha1',
-    },
+  const tamK = domainPriv.asymmetricKeyDetails.modulusLength / 8;
+  const em = privateDecrypt(
+    { key: domainPriv, padding: constants.RSA_NO_PADDING },
     Buffer.from(sobre.encrypted_key, 'base64'),
   );
+  const claveAes = oaepDesempaquetar(em, 'sha256', 'sha1');
 
   try {
     const d = createDecipheriv('aes-256-gcm', claveAes, Buffer.from(sobre.iv, 'base64'));
