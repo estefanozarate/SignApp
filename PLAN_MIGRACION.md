@@ -89,6 +89,13 @@ SDP/ICE de una sesión WebRTC, sin tocar secretos.
   `POST /respuesta`.
 - Consumo atómico de `request_id` se mantiene igual; cambia solo qué se
   guarda (SDP, no un sobre cifrado).
+- `POST /peticion` ahora acepta un tercer valor de `purpose`, además de
+  `PAIR` y `SECRET_REQUEST`: **`SECRET_VERIFY`** (sin cifrado — el
+  dominio compara un hash contra el secreto que ya tiene) y
+  **`SECRET_RECOVER`** (con sobre cifrado real — el dominio no tiene el
+  valor y necesita recibirlo). Ver `ARQUITECTURA_V2.md` §3.5 para el
+  detalle de cada uno; esta fase solo necesita que el servidor sepa
+  distinguir cuál de los dos está pidiendo el sitio al generar el QR.
 - Decidir STUN/TURN: STUN público para pruebas; TURN propio o de
   terceros pendiente para redes restrictivas en producción.
 
@@ -107,8 +114,12 @@ en vez de long-poll HTTP.
   nativo del navegador.
 - Recibe el `sdp_offer` de `/peticion`, espera la `answer` vía un
   mecanismo corto de señalización, abre el `DataChannel`.
-- Identidad (`APP_IDENTITY`) y secreto cifrado viajan por el
-  `DataChannel`, no por HTTP.
+- Para `SECRET_VERIFY`: identidad + `secret_fingerprint` firmado viajan
+  por el `DataChannel`, sin cifrado adicional — el navegador puede
+  procesarlos directamente.
+- Para `SECRET_RECOVER`: el navegador **reenvía** el sobre cifrado al
+  backend del sitio (no lo abre él mismo — no tiene la clave privada de
+  recuperación, ver `ARQUITECTURA_V2.md` §3.5).
 
 **Riesgo:** medio — se prueba en paralelo; el long-poll viejo no se
 apaga hasta confirmar que esto funciona.
@@ -126,12 +137,56 @@ WebRTC y mueva ahí la entrega/devolución del secreto.
 - `peticion.ts`: tras validar la credencial (Fase 1), generar
   `RTCPeerConnection`, procesar el offer, generar answer+ICE, mandarlo
   a `POST /senal/:id`.
-- Mover `pruebaDePosesion()` y `entregarSecreto()` para que operen
-  sobre el `DataChannel` en vez de `fetch()` contra `/respuesta`.
+- Mover `pruebaDePosesion()` para que opere sobre el `DataChannel` en
+  vez de `fetch()` contra `/respuesta`.
+- **Para `SECRET_VERIFY`:** nueva función que firma
+  `{request_id, nonce, domain_id, app_id, secret_fingerprint}` — sin
+  ningún paso de cifrado.
+- **Para `SECRET_RECOVER`:** mantener `entregarSecreto()` como está
+  hoy (firma + `cerrarSobre()`), decidiendo si `cerrarSobre()` sigue en
+  RSA-OAEP o migra a HPKE (pregunta abierta #4 de `ARQUITECTURA_V2.md`
+  — no bloquea esta fase, se puede empezar con RSA y migrar después).
 
 **Riesgo:** alto — es el cambio de mayor esfuerzo; toca la parte nativa
 de la app. Requiere el repaso más detallado de todo el plan antes de
 empezar.
+
+---
+
+## Fase 4.5 — Diagnóstico multi-dispositivo (independiente, recomendable junto a la Fase 4)
+
+**Objetivo:** que la app deje de asumir, para todos los equipos, la
+política de Keystore inferida de un solo dispositivo de referencia
+(Samsung SM-T545) — ver `ARQUITECTURA_V2.md` §7 para el detalle
+completo.
+
+Esta fase **no depende de WebRTC** — es una corrección al flujo ya
+existente de `crearIdentidad()` (§10, la app descifrando lo que el
+dominio entrega al emparejar). Se agrupa junto a la Fase 4 porque
+ambas tocan la parte nativa de Android y conviene probarlas juntas en
+dispositivos reales.
+
+**Cambios:**
+- Convertir `diagnosticarOaep()` y `autoconsistenciaCifrado()` de
+  herramientas de debug manual a parte del flujo normal de
+  `crearIdentidad()`: probar en el dispositivo real qué combinación de
+  StrongBox/autenticación/MGF1 funciona, **antes** de generar la clave
+  real.
+- Ampliar lo que se guarda en preferencias tras crear identidad (hoy
+  solo `strongBox: boolean`) para registrar también si la clave RSA
+  quedó con o sin autenticación, y qué MGF1 se usó.
+- Definir el comportamiento si ninguna combinación funciona en un
+  equipo nuevo (degradar a la más permisiva conocida, o informar
+  incompatibilidad en vez de fallar en medio de un emparejamiento).
+
+**Entregable:** probar en al menos un representante de cada familia de
+chip común — Google Pixel (Titan M), Samsung (ya se tiene), un
+Qualcomm genérico, un MediaTek. Requiere hardware físico — los
+emuladores no reproducen estos bugs.
+
+**Riesgo:** medio — no rompe nada desplegado (es una mejora al flujo
+de creación de identidad), pero requiere acceso a varios dispositivos
+físicos para validarse en serio.
 
 ---
 
@@ -141,10 +196,11 @@ empezar.
 
 **Cambios:**
 - Apagar `GET /verificar/:id` y el viejo `POST/GET /respuesta/:id`,
-  solo después de confirmar que las Fases 1–4 funcionan de punta a
+  solo después de confirmar que las Fases 1-4 funcionan de punta a
   punta en `fileserver.locker/localvault/`.
 - Actualizar `server/README.md` y `PROTOCOLO_REAL.md` para reflejar el
-  nuevo comportamiento (dejan de describir HTTP puro como transporte).
+  nuevo comportamiento (dejan de describir HTTP puro como transporte,
+  y pasan a documentar los dos tipos de operación sobre el secreto).
 
 **Riesgo:** bajo en sí mismo, pero es la única fase que **rompe
 deliberadamente** el camino viejo — se hace al final, con todo lo
@@ -158,9 +214,10 @@ demás ya probado.
 |---|---|---|---|
 | 0 | Generar credencial | Ninguno | No |
 | 1 | App valida credencial offline | Bajo | No — `/verificar` sigue viva |
-| 2 | Servidor: señalización WebRTC | Medio | No — se agrega sin quitar nada |
+| 2 | Servidor: señalización WebRTC + tipos `SECRET_VERIFY`/`SECRET_RECOVER` | Medio | No — se agrega sin quitar nada |
 | 3 | Web: canal WebRTC | Medio | No — hasta apagar el long-poll viejo |
 | 4 | App: canal WebRTC | **Alto** | No — hasta el cutover final |
+| 4.5 | Diagnóstico multi-dispositivo | Medio | No — mejora al flujo existente |
 | 5 | Retirar rutas legacy | Bajo | Sí, deliberadamente — al final |
 
 ---
@@ -169,7 +226,8 @@ demás ya probado.
 
 - [ ] Fase 0 — Credencial de dominio
 - [ ] Fase 1 — App valida credencial offline
-- [ ] Fase 2 — Señalización WebRTC en el servidor
+- [ ] Fase 2 — Señalización WebRTC + tipos de secreto en el servidor
 - [ ] Fase 3 — Web abre canal WebRTC
 - [ ] Fase 4 — App abre canal WebRTC
+- [ ] Fase 4.5 — Diagnóstico multi-dispositivo
 - [ ] Fase 5 — Retirar rutas legacy
