@@ -136,7 +136,7 @@ sequenceDiagram
 
     Note over Web,Aut: Preparación — una vez, no por transacción
     Web->>Aut: (fuera de banda) obtiene su credencial de dominio
-    Note over App,Aut: la app trae la llave pública de la autoridad;<br/>no llama a nadie en vivo para validar
+    Note over App,Aut: la app trae la llave pública de la autoridad<br/>— no llama a nadie en vivo para validar
 
     Note over Web,App: Pareo — cada transacción
     Web->>Sig: Pide código de pareo
